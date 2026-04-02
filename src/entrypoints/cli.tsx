@@ -46,7 +46,22 @@ function isLocalProviderUrl(baseUrl: string | undefined): boolean {
 }
 
 function validateProviderEnvOrExit(): void {
-  if (!isEnvTruthy(process.env.CLAUDE_CODE_USE_OPENAI)) {
+  const useOpenAI = isEnvTruthy(process.env.CLAUDE_CODE_USE_OPENAI)
+  const useGithub = isEnvTruthy(process.env.CLAUDE_CODE_USE_GITHUB)
+
+  if (useGithub && !useOpenAI) {
+    const token =
+      (process.env.GITHUB_TOKEN?.trim() || process.env.GH_TOKEN?.trim()) ?? ''
+    if (!token) {
+      console.error(
+        'GITHUB_TOKEN or GH_TOKEN is required when CLAUDE_CODE_USE_GITHUB=1.',
+      )
+      process.exit(1)
+    }
+    return
+  }
+
+  if (!useOpenAI) {
     return
   }
 
@@ -77,8 +92,15 @@ function validateProviderEnvOrExit(): void {
   }
 
   if (!process.env.OPENAI_API_KEY && !isLocalProviderUrl(request.baseUrl)) {
-    console.error('OPENAI_API_KEY is required when CLAUDE_CODE_USE_OPENAI=1 and OPENAI_BASE_URL is not local.')
-    process.exit(1)
+    const hasGithubToken = !!(
+      process.env.GITHUB_TOKEN?.trim() || process.env.GH_TOKEN?.trim()
+    )
+    if (!(useGithub && hasGithubToken)) {
+      console.error(
+        'OPENAI_API_KEY is required when CLAUDE_CODE_USE_OPENAI=1 and OPENAI_BASE_URL is not local. When CLAUDE_CODE_USE_GITHUB=1, GITHUB_TOKEN or GH_TOKEN may be used instead.',
+      )
+      process.exit(1)
+    }
   }
 }
 
@@ -96,6 +118,15 @@ async function main(): Promise<void> {
     // biome-ignore lint/suspicious/noConsole:: intentional console output
     console.log(`${MACRO.DISPLAY_VERSION ?? MACRO.VERSION} (Open Claude)`);
     return;
+  }
+
+  {
+    const { enableConfigs } = await import('../utils/config.js')
+    enableConfigs()
+    const { applySafeConfigEnvironmentVariables } = await import('../utils/managedEnv.js')
+    applySafeConfigEnvironmentVariables()
+    const { hydrateGithubModelsTokenFromSecureStorage } = await import('../utils/githubModelsCredentials.js')
+    hydrateGithubModelsTokenFromSecureStorage()
   }
 
   validateProviderEnvOrExit()

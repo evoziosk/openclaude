@@ -205,6 +205,7 @@ export async function buildLaunchEnv(options: {
     }
 
     delete env.CLAUDE_CODE_USE_OPENAI
+    delete env.CLAUDE_CODE_USE_GITHUB
 
     env.GEMINI_MODEL =
       processEnv.GEMINI_MODEL ||
@@ -239,6 +240,7 @@ export async function buildLaunchEnv(options: {
   }
 
   delete env.CLAUDE_CODE_USE_GEMINI
+  delete env.CLAUDE_CODE_USE_GITHUB
   delete env.GEMINI_API_KEY
   delete env.GEMINI_MODEL
   delete env.GEMINI_BASE_URL

@@ -2,8 +2,12 @@ import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
+import { isEnvTruthy } from '../../utils/envUtils.js'
+
 export const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1'
 export const DEFAULT_CODEX_BASE_URL = 'https://chatgpt.com/backend-api/codex'
+/** Default GitHub Models API model when user selects copilot / github:copilot */
+export const DEFAULT_GITHUB_MODELS_API_MODEL = 'openai/gpt-4.1'
 
 const CODEX_ALIAS_MODELS: Record<
   string,
@@ -171,16 +175,31 @@ export function isCodexBaseUrl(baseUrl: string | undefined): boolean {
   }
 }
 
+/**
+ * Normalize user model string for GitHub Models inference (models.github.ai).
+ * Mirrors runtime devsper `github._normalize_model_id`.
+ */
+export function normalizeGithubModelsApiModel(requestedModel: string): string {
+  const noQuery = requestedModel.split('?', 1)[0] ?? requestedModel
+  const segment =
+    noQuery.includes(':') ? noQuery.split(':', 2)[1]!.trim() : noQuery.trim()
+  if (!segment || segment.toLowerCase() === 'copilot') {
+    return DEFAULT_GITHUB_MODELS_API_MODEL
+  }
+  return segment
+}
+
 export function resolveProviderRequest(options?: {
   model?: string
   baseUrl?: string
   fallbackModel?: string
 }): ResolvedProviderRequest {
+  const isGithubMode = isEnvTruthy(process.env.CLAUDE_CODE_USE_GITHUB)
   const requestedModel =
     options?.model?.trim() ||
     process.env.OPENAI_MODEL?.trim() ||
     options?.fallbackModel?.trim() ||
-    'gpt-4o'
+    (isGithubMode ? 'github:copilot' : 'gpt-4o')
   const descriptor = parseModelDescriptor(requestedModel)
   const rawBaseUrl =
     options?.baseUrl ??
@@ -192,10 +211,16 @@ export function resolveProviderRequest(options?: {
       ? 'codex_responses'
       : 'chat_completions'
 
+  const resolvedModel =
+    transport === 'chat_completions' &&
+    isEnvTruthy(process.env.CLAUDE_CODE_USE_GITHUB)
+      ? normalizeGithubModelsApiModel(requestedModel)
+      : descriptor.baseModel
+
   return {
     transport,
     requestedModel,
-    resolvedModel: descriptor.baseModel,
+    resolvedModel,
     baseUrl:
       (rawBaseUrl ??
         (transport === 'codex_responses'

@@ -77,7 +77,9 @@ export function getContextWindowForModel(
     process.env.CLAUDE_CODE_USE_OPENAI === '1' ||
     process.env.CLAUDE_CODE_USE_OPENAI === 'true' ||
     process.env.CLAUDE_CODE_USE_GEMINI === '1' ||
-    process.env.CLAUDE_CODE_USE_GEMINI === 'true'
+    process.env.CLAUDE_CODE_USE_GEMINI === 'true' ||
+    process.env.CLAUDE_CODE_USE_GITHUB === '1' ||
+    process.env.CLAUDE_CODE_USE_GITHUB === 'true'
   ) {
     const openaiWindow = getOpenAIContextWindow(model)
     if (openaiWindow !== undefined) {
@@ -181,7 +183,9 @@ export function getModelMaxOutputTokens(model: string): {
     process.env.CLAUDE_CODE_USE_OPENAI === '1' ||
     process.env.CLAUDE_CODE_USE_OPENAI === 'true' ||
     process.env.CLAUDE_CODE_USE_GEMINI === '1' ||
-    process.env.CLAUDE_CODE_USE_GEMINI === 'true'
+    process.env.CLAUDE_CODE_USE_GEMINI === 'true' ||
+    process.env.CLAUDE_CODE_USE_GITHUB === '1' ||
+    process.env.CLAUDE_CODE_USE_GITHUB === 'true'
   ) {
     const openaiMax = getOpenAIMaxOutputTokens(model)
     if (openaiMax !== undefined) {

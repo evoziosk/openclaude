@@ -2313,7 +2313,11 @@ async function run(): Promise<CommanderCommand> {
         errors
       } = getSettingsWithErrors();
       const nonMcpErrors = errors.filter(e => !e.mcpErrorMetadata);
-      if (nonMcpErrors.length > 0 && !isEnvTruthy(process.env.CLAUDE_CODE_USE_OPENAI)) {
+      if (
+        nonMcpErrors.length > 0 &&
+        !isEnvTruthy(process.env.CLAUDE_CODE_USE_OPENAI) &&
+        !isEnvTruthy(process.env.CLAUDE_CODE_USE_GITHUB)
+      ) {
         await launchInvalidSettingsDialog(root, {
           settingsErrors: nonMcpErrors,
           onExit: () => gracefulShutdownSync(1)
