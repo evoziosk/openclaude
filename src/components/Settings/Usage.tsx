@@ -505,7 +505,13 @@ function GithubSnapshotBar({
 }): React.ReactNode {
   const displayName = snapshot.name.charAt(0).toUpperCase() + snapshot.name.slice(1)
 
-  if (snapshot.unlimited) {
+  // Treat as truly unlimited only if no finite entitlement/remaining exist.
+  // The API may set unlimited:true even for snapshots with finite quotas.
+  const isReallyUnlimited = snapshot.unlimited &&
+    (snapshot.entitlement === undefined || snapshot.entitlement <= 0) &&
+    snapshot.remaining === undefined
+
+  if (isReallyUnlimited) {
     return (
       <Box flexDirection="column">
         <Text bold>{displayName}</Text>

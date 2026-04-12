@@ -382,3 +382,77 @@ test('fetchGithubUsage includes limitReached flag when quota is exhausted', asyn
   expect(result.requests?.usedPercent).toBe(100)
   expect(result.requests?.limitReached).toBe(true)
 })
+
+test('fetchGithubUsage treats snapshot with unlimited:true but finite entitlement as finite', async () => {
+  // This matches real API behavior: free_educational_quota returns unlimited:true
+  // on ALL snapshots, even premium_requests which has entitlement=300, remaining=262
+  const fetchImpl: FetchGithubUsageOptions['fetchImpl'] = async (
+    input: RequestInfo | URL,
+    _init?: RequestInit,
+  ) => {
+    const url = String(input)
+
+    if (url.endsWith('/copilot_internal/user')) {
+      return new Response(
+        JSON.stringify({
+          access_type_sku: 'free_educational_quota',
+          copilot_plan: 'individual',
+          quota_reset_date_utc: '2026-05-01T00:00:00.000Z',
+          quota_snapshots: {
+            chat: {
+              entitlement: null,
+              remaining: null,
+              percent_remaining: null,
+              unlimited: true,
+            },
+            completions: {
+              entitlement: null,
+              remaining: null,
+              percent_remaining: null,
+              unlimited: true,
+            },
+            premium_requests: {
+              entitlement: 300,
+              remaining: 262,
+              percent_remaining: null,
+              unlimited: true,
+            },
+          },
+        }),
+        { status: 200 },
+      )
+    }
+
+    return new Response(JSON.stringify({ id: 42, login: 'test-user' }), {
+      status: 200,
+    })
+  }
+
+  const result = await fetchGithubUsage({
+    model: 'github:copilot',
+    processEnv: { GITHUB_TOKEN: 'ghu_test' },
+    fetchImpl,
+  })
+
+  // premium_requests has finite entitlement, so should NOT be treated as unlimited
+  expect(result.quotaSnapshots).toHaveLength(3)
+
+  const chatSnap = result.quotaSnapshots?.find(s => s.name === 'chat')
+  expect(chatSnap?.unlimited).toBe(true)
+
+  const completionsSnap = result.quotaSnapshots?.find(s => s.name === 'completions')
+  expect(completionsSnap?.unlimited).toBe(true)
+
+  const premiumSnap = result.quotaSnapshots?.find(s => s.name === 'premium_requests')
+  expect(premiumSnap?.unlimited).toBe(false)
+  expect(premiumSnap?.entitlement).toBe(300)
+  expect(premiumSnap?.remaining).toBe(262)
+  // usedPercent should be computed: (300-262)/300 * 100 = 12.67
+  expect(premiumSnap?.usedPercent).toBeGreaterThan(12)
+  expect(premiumSnap?.usedPercent).toBeLessThan(13)
+
+  // Not all unlimited anymore, so requests should pick premium_requests as primary
+  expect(result.requests?.unlimited).toBeUndefined()
+  expect(result.requests?.limit).toBe(300)
+  expect(result.requests?.remaining).toBe(262)
+})

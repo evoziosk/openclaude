@@ -223,7 +223,12 @@ function parseQuotaSnapshots(payload: CopilotUsageResponse): ParsedQuotaSnapshot
       entitlement,
       remaining,
       percentRemaining,
-      unlimited: Boolean(record.unlimited),
+      // Only treat as truly unlimited if there are no finite entitlement/remaining values.
+      // The API may return unlimited:true even for snapshots with finite quotas
+      // (e.g. premium_requests with entitlement=300, remaining=262, unlimited=true).
+      unlimited: Boolean(record.unlimited) &&
+        (entitlement === undefined || entitlement <= 0) &&
+        (remaining === undefined),
     })
   }
 
