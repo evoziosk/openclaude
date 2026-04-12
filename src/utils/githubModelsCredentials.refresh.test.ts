@@ -36,8 +36,14 @@ describe('refreshGithubModelsTokenIfNeeded', () => {
     const futureExp = Math.floor(Date.now() / 1000) + 3600
     let store: Record<string, unknown> = {
       githubModels: {
-        accessToken: 'tid=stale;exp=1;sku=free',
-        oauthAccessToken: 'ghu_oauth_secret',
+        accounts: [
+          {
+            accountName: 'default',
+            accessToken: 'tid=stale;exp=1;sku=free',
+            oauthAccessToken: 'ghu_oauth_secret',
+          },
+        ],
+        activeAccountName: 'default',
       },
     }
 
@@ -68,11 +74,17 @@ describe('refreshGithubModelsTokenIfNeeded', () => {
     expect(process.env.GITHUB_TOKEN?.startsWith('tid=fresh;exp=')).toBe(true)
 
     const githubModels = (store.githubModels ?? {}) as {
-      accessToken?: string
-      oauthAccessToken?: string
+      accounts?: Array<{
+        accountName?: string
+        accessToken?: string
+        oauthAccessToken?: string
+      }>
     }
-    expect(githubModels.accessToken?.startsWith('tid=fresh;exp=')).toBe(true)
-    expect(githubModels.oauthAccessToken).toBe('ghu_oauth_secret')
+    const defaultAccount = githubModels.accounts?.find(
+      account => account.accountName === 'default',
+    )
+    expect(defaultAccount?.accessToken?.startsWith('tid=fresh;exp=')).toBe(true)
+    expect(defaultAccount?.oauthAccessToken).toBe('ghu_oauth_secret')
   })
 
   test('does not refresh when current Copilot token is valid', async () => {
@@ -93,8 +105,14 @@ describe('refreshGithubModelsTokenIfNeeded', () => {
       getSecureStorage: () => ({
         read: () => ({
           githubModels: {
-            accessToken: `tid=already-valid;exp=${futureExp};sku=free`,
-            oauthAccessToken: 'ghu_oauth_secret',
+            accounts: [
+              {
+                accountName: 'default',
+                accessToken: `tid=already-valid;exp=${futureExp};sku=free`,
+                oauthAccessToken: 'ghu_oauth_secret',
+              },
+            ],
+            activeAccountName: 'default',
           },
         }),
         update: () => ({ success: true }),

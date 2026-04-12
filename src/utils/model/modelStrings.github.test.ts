@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from 'bun:test'
 
 import { resetModelStringsForTestingOnly } from '../../bootstrap/state.js'
-import { parseUserSpecifiedModel } from './model.js'
+import { parseUserSpecifiedModel, renderModelName } from './model.js'
 import { getModelStrings } from './modelStrings.js'
 
 const originalEnv = {
@@ -51,4 +51,23 @@ test('GitHub provider model strings are safe to parse', () => {
   const modelStrings = getModelStrings()
 
   expect(() => parseUserSpecifiedModel(modelStrings.sonnet46 as any)).not.toThrow()
+})
+
+test('renderModelName appends account suffix for account-tagged GitHub model', () => {
+  clearProviderFlags()
+  process.env.CLAUDE_CODE_USE_GITHUB = '1'
+
+  expect(renderModelName('gpt-4o?account=work')).toBe('GPT-4o (work)')
+  expect(renderModelName('gpt-4o?reasoning=high&account=personal')).toBe(
+    'GPT-4o (personal)',
+  )
+})
+
+test('renderModelName keeps unknown model ID and appends account suffix', () => {
+  clearProviderFlags()
+  process.env.CLAUDE_CODE_USE_GITHUB = '1'
+
+  expect(renderModelName('custom-provider-model?account=work')).toBe(
+    'custom-provider-model (work)',
+  )
 })

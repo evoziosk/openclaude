@@ -357,6 +357,18 @@ describe('getProviderPresetDefaults', () => {
     expect(defaults.baseUrl).toBe('http://localhost:11434/v1')
     expect(defaults.model).toBe('llama3.1:8b')
   })
+
+  test('codex preset defaults to codex backend alias model', async () => {
+    const { getProviderPresetDefaults } = await importFreshProviderProfileModules()
+
+    const defaults = getProviderPresetDefaults('codex')
+
+    expect(defaults.provider).toBe('openai')
+    expect(defaults.name).toBe('Codex')
+    expect(defaults.baseUrl).toBe('https://chatgpt.com/backend-api/codex')
+    expect(defaults.model).toBe('codexplan')
+    expect(defaults.requiresApiKey).toBe(false)
+  })
 })
 
 describe('deleteProviderProfile', () => {
@@ -427,3 +439,4 @@ describe('deleteProviderProfile', () => {
     expect(process.env.OPENAI_MODEL).toBe('qwen2.5:3b')
   })
 })
+

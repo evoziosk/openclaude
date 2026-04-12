@@ -113,3 +113,26 @@ test('unknown openai-compatible models still use the conservative fallback windo
 
   expect(getContextWindowForModel('some-unknown-3p-model')).toBe(8_000)
 })
+
+test('codex aliases use provider-specific context and output caps', () => {
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  delete process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS
+
+  expect(getContextWindowForModel('codexplan')).toBe(1_050_000)
+  expect(getModelMaxOutputTokens('codexplan')).toEqual({
+    default: 128_000,
+    upperLimit: 128_000,
+  })
+
+  expect(getContextWindowForModel('codexspark')).toBe(400_000)
+  expect(getModelMaxOutputTokens('codexspark')).toEqual({
+    default: 128_000,
+    upperLimit: 128_000,
+  })
+
+  expect(getContextWindowForModel('gpt-5.3-codex-spark')).toBe(400_000)
+  expect(getModelMaxOutputTokens('gpt-5.3-codex-spark')).toEqual({
+    default: 128_000,
+    upperLimit: 128_000,
+  })
+})

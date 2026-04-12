@@ -12,6 +12,25 @@ import {
 import { getModelStrings } from './modelStrings.js'
 import { getCachedOllamaModelOptions, isOllamaProvider } from './ollamaModels.js'
 
+
+function stripAccountQueryFromModel(model: string): string {
+  const trimmed = model.trim()
+  const queryIndex = trimmed.indexOf('?')
+  if (queryIndex === -1) {
+    return trimmed
+  }
+
+  const baseModel = trimmed.slice(0, queryIndex)
+  const params = new URLSearchParams(trimmed.slice(queryIndex + 1))
+  if (!params.has('account')) {
+    return trimmed
+  }
+
+  params.delete('account')
+  const query = params.toString()
+  return query ? `${baseModel}?${query}` : baseModel
+}
+
 // Cache valid models to avoid repeated API calls
 const validModelCache = new Map<string, boolean>()
 
@@ -21,7 +40,7 @@ const validModelCache = new Map<string, boolean>()
 export async function validateModel(
   model: string,
 ): Promise<{ valid: boolean; error?: string }> {
-  const normalizedModel = model.trim()
+  const normalizedModel = stripAccountQueryFromModel(model)
 
   // Empty model is invalid
   if (!normalizedModel) {

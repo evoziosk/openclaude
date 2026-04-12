@@ -35,7 +35,12 @@ describe('hydrateGithubModelsTokenFromSecureStorage', () => {
     mock.module('./secureStorage/index.js', () => ({
       getSecureStorage: () => ({
         read: () => ({
-          githubModels: { accessToken: 'stored-secret' },
+          githubModels: {
+            accounts: [
+              { accountName: 'default', accessToken: 'stored-secret' },
+            ],
+            activeAccountName: 'default',
+          },
         }),
       }),
     }))
@@ -56,7 +61,12 @@ describe('hydrateGithubModelsTokenFromSecureStorage', () => {
     mock.module('./secureStorage/index.js', () => ({
       getSecureStorage: () => ({
         read: () => ({
-          githubModels: { accessToken: 'stored-secret' },
+          githubModels: {
+            accounts: [
+              { accountName: 'default', accessToken: 'stored-secret' },
+            ],
+            activeAccountName: 'default',
+          },
         }),
       }),
     }))

@@ -29,6 +29,10 @@ import {
 } from '../utils/githubModelsCredentials.js'
 import { isEnvTruthy } from '../utils/envUtils.js'
 import { updateSettingsForSource } from '../utils/settings/settings.js'
+import {
+  runCodexOauthLogin,
+  type RunCodexOauthLoginOptions,
+} from '../utils/codexOauth.js'
 import { type OptionWithDescription, Select } from './CustomSelect/index.js'
 import { Pane } from './design-system/Pane.js'
 import TextInput from './TextInput.js'
@@ -42,6 +46,9 @@ export type ProviderManagerResult = {
 type Props = {
   mode: 'first-run' | 'manage'
   onDone: (result?: ProviderManagerResult) => void
+  runCodexOauthLoginFn?: (
+    options?: RunCodexOauthLoginOptions,
+  ) => Promise<{ ok: true } | { ok: false; message: string }>
 }
 
 type Screen =
@@ -193,7 +200,11 @@ function getGithubProviderSummary(
   return `github-models · ${GITHUB_PROVIDER_DEFAULT_BASE_URL} · ${getGithubProviderModel(processEnv)} · ${credentialSummary}${activeSuffix}`
 }
 
-export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
+export function ProviderManager({
+  mode,
+  onDone,
+  runCodexOauthLoginFn,
+}: Props): React.ReactNode {
   const initialGithubCredentialSource = getGithubCredentialSourceFromEnv()
   const initialIsGithubActive = isEnvTruthy(process.env.CLAUDE_CODE_USE_GITHUB)
   const initialHasGithubCredential = initialGithubCredentialSource !== 'none'
@@ -229,7 +240,7 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
   const [ollamaSelection, setOllamaSelection] = React.useState<OllamaSelectionState>({
     state: 'idle',
   })
-
+  const [codexOauthStatusMessage, setCodexOauthStatusMessage] = React.useState<string | undefined>()
   const currentStep = FORM_STEPS[formStepIndex] ?? FORM_STEPS[0]
   const currentStepKey = currentStep.key
   const currentValue = draft[currentStepKey]
@@ -436,7 +447,62 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
     }
   }, [draft.baseUrl, screen])
 
+  async function startCodexPresetSetup(): Promise<void> {
+    setStatusMessage(undefined)
+    setErrorMessage(undefined)
+    setCodexOauthStatusMessage('Starting Codex OAuth login...')
+
+    const loginResult = await (runCodexOauthLoginFn ?? runCodexOauthLogin)({
+      forceLogin: true,
+    })
+    if (!loginResult.ok) {
+      setCodexOauthStatusMessage(undefined)
+      setErrorMessage(loginResult.message)
+      return
+    }
+
+    setCodexOauthStatusMessage(undefined)
+    const saved = addProviderProfile(
+      {
+        provider: 'openai',
+        name: 'Codex',
+        baseUrl: 'https://chatgpt.com/backend-api/codex',
+        model: 'codexplan',
+      },
+      { makeActive: true },
+    )
+
+    if (!saved) {
+      setErrorMessage('Could not save Codex provider profile after login.')
+      return
+    }
+
+    const settingsOverrideError = clearStartupProviderOverrideFromUserSettings()
+
+    refreshProfiles()
+    const successMessage = settingsOverrideError
+      ? `Added provider: ${saved.name} (now active). Warning: could not clear startup provider override (${settingsOverrideError}).`
+      : `Added provider: ${saved.name} (now active)`
+    setStatusMessage(successMessage)
+
+    if (mode === 'first-run') {
+      onDone({
+        action: 'saved',
+        activeProfileId: saved.id,
+        message: `Provider configured: ${saved.name}`,
+      })
+      return
+    }
+
+    setScreen('menu')
+  }
+
   function startCreateFromPreset(preset: ProviderPreset): void {
+    if (preset === 'codex') {
+      void startCodexPresetSetup()
+      return
+    }
+
     const defaults = getProviderPresetDefaults(preset)
     const nextDraft = {
       name: defaults.name,
@@ -671,6 +737,11 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
         description: 'OpenAI API with API key',
       },
       {
+        value: 'codex',
+        label: 'Codex',
+        description: 'OpenAI OAuth via codex login (no API key required)',
+      },
+      {
         value: 'moonshotai',
         label: 'Moonshot AI',
         description: 'Kimi OpenAI-compatible endpoint',
@@ -739,6 +810,10 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
         <Text dimColor>
           Pick a preset, then confirm base URL, model, and API key.
         </Text>
+        {codexOauthStatusMessage && (
+          <Text dimColor>{codexOauthStatusMessage}</Text>
+        )}
+        {errorMessage && <Text color="error">{errorMessage}</Text>}
         <Select
           options={options}
           onChange={value => {
@@ -847,6 +922,7 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
         <Text dimColor>
           Active profile controls base URL, model, and API key used by this session.
         </Text>
+        {codexOauthStatusMessage && <Text dimColor>{codexOauthStatusMessage}</Text>}
         {statusMessage && <Text>{statusMessage}</Text>}
         <Box flexDirection="column">
           {profiles.length === 0 && !githubProviderAvailable ? (
@@ -1075,3 +1151,21 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
 
   return <Pane color="permission">{content}</Pane>
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

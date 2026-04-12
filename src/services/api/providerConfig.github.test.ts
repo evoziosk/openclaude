@@ -23,6 +23,8 @@ test.each([
   ['github:gpt-4o', 'gpt-4o'],
   ['gpt-4o', 'gpt-4o'],
   ['github:copilot?reasoning=high', DEFAULT_GITHUB_MODELS_API_MODEL],
+  ['github:gpt-4o?account=work', 'gpt-4o'],
+  ['github:openai/gpt-4.1?account=personal', 'openai/gpt-4.1'],
   // normalizeGithubModelsApiModel preserves provider prefix for models.github.ai compatibility
   ['github:openai/gpt-4.1', 'openai/gpt-4.1'],
   ['openai/gpt-4.1', 'openai/gpt-4.1'],
@@ -55,4 +57,10 @@ test('resolveProviderRequest leaves model unchanged without GitHub flag', () => 
   delete process.env.CLAUDE_CODE_USE_GITHUB
   const r = resolveProviderRequest({ model: 'github:gpt-4o' })
   expect(r.resolvedModel).toBe('github:gpt-4o')
+})
+
+test('resolveProviderRequest strips account query parameter from resolved model', () => {
+  process.env.CLAUDE_CODE_USE_GITHUB = '1'
+  const r = resolveProviderRequest({ model: 'gpt-4o?account=work' })
+  expect(r.resolvedModel).toBe('gpt-4o')
 })

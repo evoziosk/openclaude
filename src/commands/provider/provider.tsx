@@ -16,7 +16,6 @@ import {
   DEFAULT_CODEX_BASE_URL,
   DEFAULT_OPENAI_BASE_URL,
   isLocalProviderUrl,
-  resolveCodexApiCredentials,
   resolveProviderRequest,
 } from '../../services/api/providerConfig.js'
 import {
@@ -45,6 +44,7 @@ import {
   getGeminiProjectIdHint,
   mayHaveGeminiAdcCredentials,
 } from '../../utils/geminiAuth.js'
+import { runCodexOauthLogin } from '../../utils/codexOauth.js'
 import {
   readGeminiAccessToken,
   saveGeminiAccessToken,
@@ -94,6 +94,7 @@ type Step =
       authMode: 'api-key' | 'access-token' | 'adc'
     }
   | { name: 'codex-check' }
+  | { name: 'codex-oauth-login' }
 
 type CurrentProviderSummary = {
   providerLabel: string
@@ -122,6 +123,26 @@ type TextEntryDialogProps = {
   onSubmit: (value: string) => void
   onCancel: () => void
 }
+
+
+type CodexModelAlias = 'codexplan' | 'codexspark'
+
+const CODEX_MODELS: Array<{
+  label: CodexModelAlias
+  value: CodexModelAlias
+  description: string
+}> = [
+  {
+    label: 'codexplan',
+    value: 'codexplan',
+    description: 'GPT-5.4 with higher reasoning on the Codex backend',
+  },
+  {
+    label: 'codexspark',
+    value: 'codexspark',
+    description: 'Faster Codex Spark tool loop profile',
+  },
+]
 
 type ProviderWizardDefaults = {
   openAIModel: string
@@ -907,10 +928,12 @@ function CodexCredentialStep({
   onSave,
   onBack,
   onCancel,
+  onStartOauthLogin,
 }: {
   onSave: (profile: ProviderProfile, env: ProfileEnv) => void
   onBack: () => void
   onCancel: () => void
+  onStartOauthLogin: () => void
 }): React.ReactNode {
   const credentials = resolveCodexCredentials(process.env)
 
@@ -921,29 +944,37 @@ function CodexCredentialStep({
           <Text>{credentials.message}</Text>
           <Select
             options={[
-              { label: 'Back', value: 'back' },
-              { label: 'Cancel', value: 'cancel' },
+              {
+                label: 'Sign in with OpenAI OAuth',
+                value: 'oauth' as const,
+                description: 'Run `codex login` and use that auth for Codex models',
+              },
+              {
+                label: 'Back',
+                value: 'back' as const,
+              },
+              {
+                label: 'Cancel',
+                value: 'cancel' as const,
+              },
             ]}
-            onChange={value => (value === 'back' ? onBack() : onCancel())}
+            onChange={value => {
+              if (value === 'oauth') {
+                onStartOauthLogin()
+                return
+              }
+              if (value === 'back') {
+                onBack()
+                return
+              }
+              onCancel()
+            }}
             onCancel={onCancel}
           />
         </Box>
       </Dialog>
     )
   }
-
-  const options: OptionWithDescription<string>[] = [
-    {
-      label: 'codexplan',
-      value: 'codexplan',
-      description: 'GPT-5.4 with higher reasoning on the Codex backend',
-    },
-    {
-      label: 'codexspark',
-      value: 'codexspark',
-      description: 'Faster Codex Spark tool loop profile',
-    },
-  ]
 
   return (
     <Dialog title="Choose a Codex profile" onCancel={onBack}>
@@ -953,16 +984,13 @@ function CodexCredentialStep({
           {credentials.sourceDescription} and save a model alias profile.
         </Text>
         <Select
-          options={options}
+          options={CODEX_MODELS}
           defaultValue="codexplan"
           defaultFocusValue="codexplan"
           inlineDescriptions
-          visibleOptionCount={options.length}
+          visibleOptionCount={CODEX_MODELS.length}
           onChange={value => {
-            const env = buildCodexProfileEnv({
-              model: value,
-              processEnv: process.env,
-            })
+            const env = buildCodexModelEnv(value, process.env)
             if (env) {
               onSave('codex', env)
             }
@@ -972,6 +1000,12 @@ function CodexCredentialStep({
       </Box>
     </Dialog>
   )
+}
+function buildCodexModelEnv(
+  model: CodexModelAlias,
+  processEnv: NodeJS.ProcessEnv = process.env,
+): ProfileEnv | null {
+  return buildCodexProfileEnv({ model, processEnv })
 }
 
 function resolveCodexCredentials(processEnv: NodeJS.ProcessEnv):
@@ -1470,9 +1504,73 @@ export function ProviderWizard({
           onCancel={() => onDone()}
         />
       )
+
+    case 'codex-oauth-login':
+      return (
+        <Dialog title="Codex OAuth login" onCancel={() => setStep({ name: 'codex-check' })}>
+          <Box flexDirection="column" gap={1}>
+            <Text>
+              This will run <Text bold>codex login</Text> in your terminal to
+              authorize with OpenAI OAuth.
+            </Text>
+            <Text dimColor>
+              After login succeeds, a Codex profile using codexplan will be saved.
+            </Text>
+            <Select
+              options={[
+                {
+                  label: 'Start login',
+                  value: 'start' as const,
+                  description: 'Launch codex login now',
+                },
+                {
+                  label: 'Back',
+                  value: 'back' as const,
+                },
+                {
+                  label: 'Cancel',
+                  value: 'cancel' as const,
+                },
+              ]}
+              onChange={value => {
+                if (value === 'back') {
+                  setStep({ name: 'codex-check' })
+                  return
+                }
+                if (value === 'cancel') {
+                  onDone()
+                  return
+                }
+
+                void (async () => {
+                  const result = await runCodexOauthLogin()
+                  if (!result.ok) {
+                    onDone(result.message, { display: 'system' })
+                    setStep({ name: 'codex-check' })
+                    return
+                  }
+
+                  const env = buildCodexModelEnv('codexplan', process.env)
+                  if (!env) {
+                    onDone(
+                      'Codex login succeeded, but profile save failed. Run /provider and choose Codex again.',
+                      { display: 'system' },
+                    )
+                    setStep({ name: 'codex-check' })
+                    return
+                  }
+
+                  finishProfileSave(onDone, 'codex', env)
+                })()
+              }}
+              onCancel={() => setStep({ name: 'codex-check' })}
+              visibleOptionCount={3}
+            />
+          </Box>
+        </Dialog>
+      )
   }
 }
-
 export const call: LocalJSXCommandCall = async (onDone, _context, args) => {
   const trimmedArgs = args?.trim().toLowerCase() ?? ''
 
@@ -1505,3 +1603,9 @@ export const call: LocalJSXCommandCall = async (onDone, _context, args) => {
     />
   )
 }
+
+
+
+
+
+

@@ -61,7 +61,7 @@ function CodexUsageLimitBar({
         {resetText ? (
           <>
             <Text> </Text>
-            <Text dimColor>· {resetText}</Text>
+            <Text dimColor>- {resetText}</Text>
           </>
         ) : null}
       </Text>
@@ -87,32 +87,38 @@ function CodexUsageTextRow({
   return (
     <Text>
       <Text bold>{label}</Text>
-      <Text dimColor> · {value}</Text>
+      <Text dimColor> - {value}</Text>
     </Text>
   )
 }
 
-export function CodexUsage(): React.ReactNode {
+type CodexUsageProps = {
+  baseUrl?: string
+  model?: string
+  subtitle?: string
+}
+
+export function CodexUsage({
+  baseUrl,
+  model,
+  subtitle,
+}: CodexUsageProps = {}): React.ReactNode {
   const [usage, setUsage] = useState<CodexUsageData | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [isLoading, setIsLoading] = useState(true)
   const { columns } = useTerminalSize()
   const availableWidth = columns - 2
   const maxWidth = Math.min(availableWidth, 80)
 
   const loadUsage = React.useCallback(async () => {
-    setIsLoading(true)
     setError(null)
 
     try {
-      setUsage(await fetchCodexUsage())
+      setUsage(await fetchCodexUsage({ baseUrl, model }))
     } catch (err) {
       logError(err as Error)
       setError(err instanceof Error ? err.message : 'Failed to load Codex usage')
-    } finally {
-      setIsLoading(false)
     }
-  }, [])
+  }, [baseUrl, model])
 
   useEffect(() => {
     void loadUsage()
@@ -125,7 +131,7 @@ export function CodexUsage(): React.ReactNode {
     },
     {
       context: 'Settings',
-      isActive: !!error && !isLoading,
+      isActive: !!error,
     },
   )
 
@@ -156,7 +162,7 @@ export function CodexUsage(): React.ReactNode {
   if (!usage) {
     return (
       <Box flexDirection="column" gap={1}>
-        <Text dimColor>Loading Codex usage data…</Text>
+        <Text dimColor>Loading Codex usage data...</Text>
         <Text dimColor>
           <ConfigurableShortcutHint
             action="confirm:no"
@@ -174,6 +180,7 @@ export function CodexUsage(): React.ReactNode {
 
   return (
     <Box flexDirection="column" gap={1} width="100%">
+      {subtitle ? <Text dimColor>{subtitle}</Text> : null}
       {planType ? <Text dimColor>Plan: {planType}</Text> : null}
 
       {rows.length === 0 ? (

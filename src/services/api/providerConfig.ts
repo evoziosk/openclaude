@@ -299,8 +299,22 @@ export function isCodexBaseUrl(baseUrl: string | undefined): boolean {
  * Normalize user model string for GitHub Copilot API inference.
  * Mirrors how Copilot resolves model IDs internally.
  */
+function stripGithubModelAccountQuery(model: string): string {
+  const queryIndex = model.indexOf('?')
+  if (queryIndex === -1) {
+    return model
+  }
+
+  const baseModel = model.slice(0, queryIndex)
+  const params = new URLSearchParams(model.slice(queryIndex + 1))
+  params.delete('account')
+  const query = params.toString()
+  return query ? `${baseModel}?${query}` : baseModel
+}
+
 export function normalizeGithubCopilotModel(requestedModel: string): string {
-  const noQuery = requestedModel.split('?', 1)[0] ?? requestedModel
+  const withoutAccount = stripGithubModelAccountQuery(requestedModel)
+  const noQuery = withoutAccount.split('?', 1)[0] ?? withoutAccount
   const segment =
     noQuery.includes(':') ? noQuery.split(':', 2)[1]!.trim() : noQuery.trim()
   if (!segment || segment.toLowerCase() === 'copilot') {
@@ -319,7 +333,8 @@ export function normalizeGithubCopilotModel(requestedModel: string): string {
  * Only normalizes the default alias, preserves provider-qualified models.
  */
 export function normalizeGithubModelsApiModel(requestedModel: string): string {
-  const noQuery = requestedModel.split('?', 1)[0] ?? requestedModel
+  const withoutAccount = stripGithubModelAccountQuery(requestedModel)
+  const noQuery = withoutAccount.split('?', 1)[0] ?? withoutAccount
   const segment =
     noQuery.includes(':') ? noQuery.split(':', 2)[1]!.trim() : noQuery.trim()
   // Only normalize the default alias for GitHub Models

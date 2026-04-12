@@ -25,7 +25,10 @@ import { APIError } from '@anthropic-ai/sdk'
 import { isEnvTruthy } from '../../utils/envUtils.js'
 import { resolveGeminiCredential } from '../../utils/geminiAuth.js'
 import { hydrateGeminiAccessTokenFromSecureStorage } from '../../utils/geminiCredentials.js'
-import { hydrateGithubModelsTokenFromSecureStorage } from '../../utils/githubModelsCredentials.js'
+import {
+  hydrateGithubModelsTokenFromSecureStorage,
+  resolveGithubTokenForModel,
+} from '../../utils/githubModelsCredentials.js'
 import {
   looksLikeLeakedReasoningPrefix,
   shouldBufferPotentialReasoningPrefix,
@@ -1117,7 +1120,10 @@ class OpenAIShimMessages {
     const isGithubCopilotEndpoint = isGithubMode && githubEndpointType === 'copilot'
 
     if (isGithubWithCodexTransport) {
-      const apiKey = this.providerOverride?.apiKey ?? process.env.OPENAI_API_KEY ?? ''
+      const apiKey =
+        this.providerOverride?.apiKey ??
+        resolveGithubTokenForModel(request.requestedModel) ??
+        ''
       if (!apiKey) {
         throw new Error(
           'GitHub Copilot auth is required. Run /onboard-github to sign in.',
@@ -1269,7 +1275,12 @@ class OpenAIShimMessages {
     }
 
     const isGemini = isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI)
-    const apiKey = this.providerOverride?.apiKey ?? process.env.OPENAI_API_KEY ?? ''
+    const githubApiKey = isGithub
+      ? resolveGithubTokenForModel(request.requestedModel)
+      : undefined
+    const apiKey =
+      this.providerOverride?.apiKey ??
+      (isGithub ? (githubApiKey ?? '') : (process.env.OPENAI_API_KEY ?? ''))
     // Detect Azure endpoints by hostname (not raw URL) to prevent bypass via
     // path segments like https://evil.com/cognitiveservices.azure.com/
     let isAzure = false
@@ -1611,7 +1622,8 @@ export function createOpenAIShimClient(options: {
   } else if (isEnvTruthy(process.env.CLAUDE_CODE_USE_GITHUB)) {
     process.env.OPENAI_BASE_URL ??= GITHUB_COPILOT_BASE
     process.env.OPENAI_API_KEY ??=
-      process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN ?? ''
+      resolveGithubTokenForModel(process.env.OPENAI_MODEL ?? 'github:copilot') ??
+      ''
   }
 
   const beta = new OpenAIShimBeta({

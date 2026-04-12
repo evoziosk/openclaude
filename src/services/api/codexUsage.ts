@@ -390,10 +390,19 @@ export function getCodexUsageUrl(baseUrl = DEFAULT_CODEX_BASE_URL): string {
   return new URL('/backend-api/wham/usage', baseUrl).toString()
 }
 
-export async function fetchCodexUsage(): Promise<CodexUsageData> {
+export type FetchCodexUsageOptions = {
+  baseUrl?: string
+  model?: string
+  processEnv?: NodeJS.ProcessEnv
+}
+
+export async function fetchCodexUsage(
+  options: FetchCodexUsageOptions = {},
+): Promise<CodexUsageData> {
+  const processEnv = options.processEnv ?? process.env
   const request = resolveProviderRequest({
-    model: process.env.OPENAI_MODEL,
-    baseUrl: process.env.OPENAI_BASE_URL,
+    model: options.model ?? processEnv.OPENAI_MODEL,
+    baseUrl: options.baseUrl ?? processEnv.OPENAI_BASE_URL,
   })
   if (!isCodexBaseUrl(request.baseUrl)) {
     throw new Error(
@@ -401,7 +410,7 @@ export async function fetchCodexUsage(): Promise<CodexUsageData> {
     )
   }
 
-  const credentials = resolveCodexApiCredentials()
+  const credentials = resolveCodexApiCredentials(processEnv)
   if (!credentials.apiKey) {
     const authHint = credentials.authPath
       ? ` or place a Codex auth.json at ${credentials.authPath}`
@@ -432,3 +441,4 @@ export async function fetchCodexUsage(): Promise<CodexUsageData> {
 
   return normalizeCodexUsagePayload(await response.json())
 }
+

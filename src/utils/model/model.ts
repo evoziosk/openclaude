@@ -460,6 +460,8 @@ export function renderModelSetting(setting: ModelName | ModelAlias): string {
  * if the model is not recognized as a public model.
  */
 export function getPublicModelDisplayName(model: ModelName): string | null {
+  const { modelWithoutAccount } = parseModelQuery(model)
+  const normalizedModel = modelWithoutAccount.split('?', 1)[0] ?? modelWithoutAccount
   // For OpenAI/Gemini/Codex/GitHub providers, show the actual model name not a Claude alias
   if (getAPIProvider() === 'openai' || getAPIProvider() === 'gemini' || getAPIProvider() === 'codex' || getAPIProvider() === 'github') {
     // Return display names for known GitHub Copilot models
@@ -484,12 +486,12 @@ export function getPublicModelDisplayName(model: ModelName): string | null {
       'gemini-2.5-pro': 'Gemini 2.5 Pro',
       'grok-code-fast-1': 'Grok Code Fast 1',
     }
-    if (copilotModelNames[model]) {
-      return copilotModelNames[model]
+    if (copilotModelNames[normalizedModel]) {
+      return copilotModelNames[normalizedModel]
     }
     return null
   }
-  switch (model) {
+  switch (normalizedModel) {
     case 'gpt-5.4':
       return 'GPT-5.4'
     case 'gpt-5.3-codex-spark':
@@ -529,6 +531,31 @@ export function getPublicModelDisplayName(model: ModelName): string | null {
   }
 }
 
+function parseModelQuery(model: string): {
+  modelWithoutAccount: string
+  accountName?: string
+} {
+  const trimmed = model.trim()
+  const queryIndex = trimmed.indexOf('?')
+  if (queryIndex === -1) {
+    return { modelWithoutAccount: trimmed }
+  }
+
+  const baseModel = trimmed.slice(0, queryIndex)
+  const params = new URLSearchParams(trimmed.slice(queryIndex + 1))
+  const accountName = params.get('account')?.trim()
+  if (!accountName) {
+    return { modelWithoutAccount: trimmed }
+  }
+
+  params.delete('account')
+  const query = params.toString()
+  return {
+    modelWithoutAccount: query ? `${baseModel}?${query}` : baseModel,
+    accountName,
+  }
+}
+
 function maskModelCodename(baseName: string): string {
   // Mask only the first dash-separated segment (the codename), preserve the rest
   // e.g. capybara-v2-fast → cap*****-v2-fast
@@ -539,29 +566,56 @@ function maskModelCodename(baseName: string): string {
 }
 
 export function renderModelName(model: ModelName): string {
-  const publicName = getPublicModelDisplayName(model)
-  if (publicName) {
-    return publicName
+  const { modelWithoutAccount, accountName } = parseModelQuery(model)
+  if (!accountName) {
+    const publicName = getPublicModelDisplayName(model)
+    if (publicName) {
+      return publicName
+    }
+    if (model === 'github:copilot') {
+      return 'GPT-4o'
+    }
+    if (process.env.USER_TYPE === 'ant') {
+      const resolved = parseUserSpecifiedModel(model)
+      const antModel = resolveAntModel(model)
+      if (antModel) {
+        const baseName = antModel.model.replace(/\[1m\]$/i, '')
+        const masked = maskModelCodename(baseName)
+        const suffix = has1mContext(resolved) ? '[1m]' : ''
+        return masked + suffix
+      }
+      if (resolved !== model) {
+        return `${model} (${resolved})`
+      }
+      return resolved
+    }
+    return model
   }
-  // Handle GitHub Copilot special model aliases
-  if (model === 'github:copilot') {
-    return 'GPT-4o'
+
+  const accountSuffix = ` (${accountName})`
+  const publicName = getPublicModelDisplayName(modelWithoutAccount)
+  if (publicName) {
+    return publicName + accountSuffix
+  }
+  if (modelWithoutAccount === 'github:copilot') {
+    return 'GPT-4o' + accountSuffix
   }
   if (process.env.USER_TYPE === 'ant') {
-    const resolved = parseUserSpecifiedModel(model)
-    const antModel = resolveAntModel(model)
+    const resolved = parseUserSpecifiedModel(modelWithoutAccount)
+    const antModel = resolveAntModel(modelWithoutAccount)
     if (antModel) {
       const baseName = antModel.model.replace(/\[1m\]$/i, '')
       const masked = maskModelCodename(baseName)
       const suffix = has1mContext(resolved) ? '[1m]' : ''
-      return masked + suffix
+      return masked + suffix + accountSuffix
     }
-    if (resolved !== model) {
-      return `${model} (${resolved})`
+    if (resolved !== modelWithoutAccount) {
+      return `${modelWithoutAccount} (${resolved})` + accountSuffix
     }
-    return resolved
+    return resolved + accountSuffix
   }
-  return model
+
+  return modelWithoutAccount + accountSuffix
 }
 
 /**

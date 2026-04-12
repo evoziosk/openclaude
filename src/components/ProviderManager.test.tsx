@@ -198,6 +198,9 @@ async function mountProviderManager(
   options?: {
     mode?: 'first-run' | 'manage'
     onDone?: (result?: unknown) => void
+    runCodexOauthLoginFn?: (
+      options?: { forceLogin?: boolean },
+    ) => Promise<{ ok: true } | { ok: false; message: string }>
   },
 ): Promise<{
   stdin: PassThrough
@@ -217,6 +220,7 @@ async function mountProviderManager(
         <ProviderManager
           mode={options?.mode ?? 'manage'}
           onDone={options?.onDone ?? (() => {})}
+          runCodexOauthLoginFn={options?.runCodexOauthLoginFn}
         />
       </KeybindingSetup>
     </AppStateProvider>,
@@ -435,3 +439,130 @@ test('ProviderManager avoids first-frame false negative while stored-token looku
   expect(syncRead).not.toHaveBeenCalled()
   expect(asyncRead).toHaveBeenCalled()
 })
+
+test('ProviderManager first-run Codex preset runs OAuth and saves Codex profile', async () => {
+  delete process.env.CLAUDE_CODE_USE_GITHUB
+  delete process.env.GITHUB_TOKEN
+  delete process.env.GH_TOKEN
+
+  const onDone = mock(() => {})
+  const addProviderProfile = mock((payload: {
+    provider: string
+    name: string
+    baseUrl: string
+    model: string
+    apiKey?: string
+  }) => ({
+    id: 'provider_codex',
+    provider: payload.provider,
+    name: payload.name,
+    baseUrl: payload.baseUrl,
+    model: payload.model,
+    apiKey: payload.apiKey,
+  }))
+
+  const runCodexOauthLogin = mock(async () => ({ ok: true as const }))
+
+  mockProviderManagerDependencies(
+    () => undefined,
+    async () => undefined,
+    {
+      addProviderProfile,
+    },
+  )
+
+  const nonce = `${Date.now()}-${Math.random()}`
+  const { ProviderManager } = await import('./ProviderManager.js?ts=' + nonce)
+  const mounted = await mountProviderManager(ProviderManager, {
+    mode: 'first-run',
+    onDone,
+    runCodexOauthLoginFn: runCodexOauthLogin,
+  })
+
+  await waitForFrameOutput(
+    mounted.getOutput,
+    frame => frame.includes('Set up provider') && frame.includes('Codex'),
+  )
+
+  mounted.stdin.write('j')
+  await Bun.sleep(40)
+  mounted.stdin.write('j')
+  await Bun.sleep(40)
+  mounted.stdin.write('j')
+  await Bun.sleep(40)
+  mounted.stdin.write('\r')
+
+  await waitForCondition(() => onDone.mock.calls.length > 0)
+
+  expect(runCodexOauthLogin).toHaveBeenCalledWith({ forceLogin: true })
+  expect(addProviderProfile).toHaveBeenCalledWith(
+    expect.objectContaining({
+      name: 'Codex',
+      baseUrl: 'https://chatgpt.com/backend-api/codex',
+      model: 'codexplan',
+    }),
+    { makeActive: true },
+  )
+  expect(onDone).toHaveBeenCalledWith(
+    expect.objectContaining({
+      action: 'saved',
+      message: 'Provider configured: Codex',
+    }),
+  )
+
+  await mounted.dispose()
+})
+
+test('ProviderManager Codex preset surfaces OAuth failure and does not save profile', async () => {
+  delete process.env.CLAUDE_CODE_USE_GITHUB
+  delete process.env.GITHUB_TOKEN
+  delete process.env.GH_TOKEN
+
+  const onDone = mock(() => {})
+  const addProviderProfile = mock(() => null)
+  const runCodexOauthLogin = mock(async () => ({
+    ok: false as const,
+    message: 'Codex login did not complete successfully',
+  }))
+
+  mockProviderManagerDependencies(
+    () => undefined,
+    async () => undefined,
+    {
+      addProviderProfile,
+    },
+  )
+
+  const nonce = `${Date.now()}-${Math.random()}`
+  const { ProviderManager } = await import('./ProviderManager.js?ts=' + nonce)
+  const mounted = await mountProviderManager(ProviderManager, {
+    mode: 'first-run',
+    onDone,
+    runCodexOauthLoginFn: runCodexOauthLogin,
+  })
+
+  await waitForFrameOutput(
+    mounted.getOutput,
+    frame => frame.includes('Set up provider') && frame.includes('Codex'),
+  )
+
+  mounted.stdin.write('j')
+  await Bun.sleep(40)
+  mounted.stdin.write('j')
+  await Bun.sleep(40)
+  mounted.stdin.write('j')
+  await Bun.sleep(40)
+  mounted.stdin.write('\r')
+
+  await waitForCondition(() => runCodexOauthLogin.mock.calls.length > 0)
+  expect(runCodexOauthLogin).toHaveBeenCalledWith({ forceLogin: true })
+
+  expect(addProviderProfile).not.toHaveBeenCalled()
+  expect(onDone).not.toHaveBeenCalled()
+
+  await mounted.dispose()
+})
+
+
+
+

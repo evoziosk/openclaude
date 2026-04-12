@@ -54,6 +54,10 @@ const OPENAI_CONTEXT_WINDOWS: Record<string, number> = {
   'gpt-5.4':               1_050_000,
   'gpt-5.4-mini':            400_000,
   'gpt-5.4-nano':            400_000,
+  'codexplan':              1_050_000,
+  'gpt-5.3-codex':           400_000,
+  'codexspark':               400_000,
+  'gpt-5.3-codex-spark':     400_000,
   'gpt-4o':                   128_000,
   'gpt-4o-mini':              128_000,
   'gpt-4.1':                  1_047_576,
@@ -161,6 +165,10 @@ const OPENAI_MAX_OUTPUT_TOKENS: Record<string, number> = {
   'gpt-5.4':                 128_000,
   'gpt-5.4-mini':            128_000,
   'gpt-5.4-nano':            128_000,
+  'codexplan':               128_000,
+  'gpt-5.3-codex':           128_000,
+  'codexspark':              128_000,
+  'gpt-5.3-codex-spark':     128_000,
   'gpt-4o':                   16_384,
   'gpt-4o-mini':              16_384,
   'gpt-4.1':                  32_768,
@@ -262,3 +270,4 @@ export function getOpenAIContextWindow(model: string): number | undefined {
 export function getOpenAIMaxOutputTokens(model: string): number | undefined {
   return lookupByModel(OPENAI_MAX_OUTPUT_TOKENS, model)
 }
+

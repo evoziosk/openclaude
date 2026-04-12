@@ -10,6 +10,7 @@ export type ProviderPreset =
   | 'anthropic'
   | 'ollama'
   | 'openai'
+  | 'codex'
   | 'moonshotai'
   | 'deepseek'
   | 'gemini'
@@ -135,6 +136,15 @@ export function getProviderPresetDefaults(
         model: 'gpt-5.3-codex',
         apiKey: '',
         requiresApiKey: true,
+      }
+    case 'codex':
+      return {
+        provider: 'openai',
+        name: 'Codex',
+        baseUrl: 'https://chatgpt.com/backend-api/codex',
+        model: 'codexplan',
+        apiKey: '',
+        requiresApiKey: false,
       }
     case 'moonshotai':
       return {
@@ -751,3 +761,4 @@ export function clearActiveOpenAIModelOptionsCache(): void {
     }
   })
 }
+

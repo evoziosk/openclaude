@@ -3,6 +3,25 @@ import { isModelAlias, isModelFamilyAlias } from './aliases.js'
 import { parseUserSpecifiedModel } from './model.js'
 import { resolveOverriddenModel } from './modelStrings.js'
 
+
+function stripAccountQueryFromModel(model: string): string {
+  const trimmed = model.trim()
+  const queryIndex = trimmed.indexOf('?')
+  if (queryIndex === -1) {
+    return trimmed
+  }
+
+  const baseModel = trimmed.slice(0, queryIndex)
+  const params = new URLSearchParams(trimmed.slice(queryIndex + 1))
+  if (!params.has('account')) {
+    return trimmed
+  }
+
+  params.delete('account')
+  const query = params.toString()
+  return query ? `${baseModel}?${query}` : baseModel
+}
+
 /**
  * Check if a model belongs to a given family by checking if its name
  * (or resolved name) contains the family identifier.
@@ -108,7 +127,7 @@ export function isModelAllowed(model: string): boolean {
   }
 
   const resolvedModel = resolveOverriddenModel(model)
-  const normalizedModel = resolvedModel.trim().toLowerCase()
+  const normalizedModel = stripAccountQueryFromModel(resolvedModel).toLowerCase()
   const normalizedAllowlist = availableModels.map(m => m.trim().toLowerCase())
 
   // Direct match (alias-to-alias or full-name-to-full-name)

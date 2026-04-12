@@ -146,3 +146,24 @@ describe('activateGithubOnboardingMode', () => {
 })
 
 const DEFAULT_MODEL_FOR_TESTS = 'github:copilot'
+
+describe('multi-account onboarding model tagging', () => {
+  test('buildGithubOnboardingSettingsEnv keeps account-tagged model', () => {
+    const settingsEnv = buildGithubOnboardingSettingsEnv('github:copilot?account=work')
+    expect(settingsEnv.OPENAI_MODEL).toBe('github:copilot?account=work')
+    expect(settingsEnv.CLAUDE_CODE_USE_GITHUB).toBe('1')
+  })
+
+  test('applyGithubOnboardingProcessEnv keeps account-tagged model', () => {
+    const env: NodeJS.ProcessEnv = {
+      OPENAI_MODEL: 'gpt-4o',
+      CLAUDE_CODE_USE_OPENAI: '1',
+    }
+
+    applyGithubOnboardingProcessEnv('github:copilot?account=personal', env)
+
+    expect(env.CLAUDE_CODE_USE_GITHUB).toBe('1')
+    expect(env.OPENAI_MODEL).toBe('github:copilot?account=personal')
+    expect(env.CLAUDE_CODE_USE_OPENAI).toBeUndefined()
+  })
+})
