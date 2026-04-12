@@ -250,40 +250,15 @@ function parseResetDateFromPayload(payload: CopilotUsageResponse): string | unde
 
 function formatPlanType(
   payload: CopilotUsageResponse,
-  snapshots: ParsedQuotaSnapshot[],
+  _snapshots: ParsedQuotaSnapshot[],
 ): string | undefined {
   const accessType = asString(payload.access_type_sku)
   const plan = asString(payload.copilot_plan)
 
-  let base: string | undefined
   if (accessType && plan) {
-    base = `${accessType} - ${plan}`
-  } else {
-    base = accessType ?? plan
+    return `${accessType} - ${plan}`
   }
-
-  // Add per-snapshot breakdown lines like reference does
-  if (base && snapshots.length > 0) {
-    const lines: string[] = [base]
-    for (const snap of snapshots) {
-      if (snap.unlimited) {
-        lines.push(`  - ${snap.name}: unlimited`)
-      } else if (snap.remaining !== undefined && snap.entitlement !== undefined) {
-        const used = snap.entitlement - snap.remaining
-        lines.push(
-          `  - ${snap.name}: ${Math.max(0, used)}/${snap.entitlement}`,
-        )
-      } else if (snap.percentRemaining !== undefined) {
-        const usedPct = clampPercent(100 - snap.percentRemaining)
-        lines.push(`  - ${snap.name}: ${Math.floor(usedPct)}% used`)
-      }
-    }
-    if (lines.length > 1) {
-      return lines.join('\n')
-    }
-  }
-
-  return base
+  return accessType ?? plan
 }
 
 // ---------------------------------------------------------------------------

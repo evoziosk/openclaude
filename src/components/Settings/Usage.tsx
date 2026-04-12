@@ -496,6 +496,12 @@ function GithubUsageBar({
   )
 }
 
+/**
+ * Renders a single GitHub quota snapshot as a labeled bar (or "Unlimited" text).
+ *
+ * Follows the same pattern as CodexUsageLimitBar: receives `usedPercent` (0-100,
+ * percentage USED — NOT remaining), renders ProgressBar with ratio = usedPercent / 100.
+ */
 function GithubSnapshotBar({
   snapshot,
   maxWidth,
@@ -503,11 +509,16 @@ function GithubSnapshotBar({
   snapshot: GithubUsageSnapshot
   maxWidth: number
 }): React.ReactNode {
-  const displayName = snapshot.name.charAt(0).toUpperCase() + snapshot.name.slice(1)
+  // Capitalize first letter: "premium_requests" → "Premium_requests"
+  const displayName =
+    snapshot.name.replace(/_/g, ' ').replace(/^./, c => c.toUpperCase())
 
-  // Treat as truly unlimited only if no finite entitlement/remaining exist.
-  // The API may set unlimited:true even for snapshots with finite quotas.
-  const isReallyUnlimited = snapshot.unlimited &&
+  // ── Truly unlimited? ──────────────────────────────────────────────────
+  // The GitHub API sends unlimited:true on ALL snapshots, even ones with
+  // finite entitlement/remaining. Treat as unlimited ONLY when there are
+  // no finite values.
+  const isReallyUnlimited =
+    snapshot.unlimited &&
     (snapshot.entitlement === undefined || snapshot.entitlement <= 0) &&
     snapshot.remaining === undefined
 
@@ -520,7 +531,8 @@ function GithubSnapshotBar({
     )
   }
 
-  // Compute usedPercent from service data, or from remaining/entitlement as fallback
+  // ── Compute usedPercent (0-100, percentage USED) ──────────────────────
+  // Priority: service-provided usedPercent > derive from entitlement/remaining
   let usedPercent = snapshot.usedPercent
   if (
     usedPercent === undefined &&
@@ -528,33 +540,20 @@ function GithubSnapshotBar({
     snapshot.entitlement > 0 &&
     snapshot.remaining !== undefined
   ) {
-    usedPercent = Math.max(
-      0,
-      Math.min(100, ((snapshot.entitlement - snapshot.remaining) / snapshot.entitlement) * 100),
-    )
+    usedPercent =
+      ((snapshot.entitlement - snapshot.remaining) / snapshot.entitlement) * 100
   }
 
-  if (usedPercent === undefined) {
-    const remainingText =
-      snapshot.remaining !== undefined && snapshot.entitlement !== undefined
-        ? `${snapshot.remaining.toLocaleString()} / ${snapshot.entitlement.toLocaleString()} remaining`
-        : snapshot.remaining !== undefined
-          ? `${snapshot.remaining.toLocaleString()} remaining`
-          : snapshot.entitlement !== undefined
-            ? `Limit: ${snapshot.entitlement.toLocaleString()}`
-            : 'Usage data unavailable'
+  // Clamp to [0, 100]
+  const normalized =
+    usedPercent !== undefined ? Math.max(0, Math.min(100, usedPercent)) : 0
 
-    return (
-      <Box flexDirection="column">
-        <Text bold>{displayName}</Text>
-        <Text dimColor>{remainingText}</Text>
-      </Box>
-    )
-  }
+  const usedText =
+    usedPercent !== undefined ? `${Math.floor(normalized)}% used` : undefined
+  const limitReached =
+    snapshot.percentRemaining !== undefined && snapshot.percentRemaining <= 0
 
-  const normalized = Math.max(0, Math.min(100, usedPercent))
-  const usedText = `${Math.floor(normalized)}% used`
-  const limitReached = snapshot.percentRemaining !== undefined && snapshot.percentRemaining <= 0
+  // Build subtext (remaining count + reset)
   const remainingText =
     snapshot.remaining !== undefined && snapshot.entitlement !== undefined
       ? `${snapshot.remaining.toLocaleString()} / ${snapshot.entitlement.toLocaleString()} remaining`
@@ -562,6 +561,7 @@ function GithubSnapshotBar({
         ? `${snapshot.remaining.toLocaleString()} remaining`
         : undefined
 
+  // ── Wide layout (≥62 cols) ────────────────────────────────────────────
   if (maxWidth >= 62) {
     return (
       <Box flexDirection="column">
@@ -573,7 +573,9 @@ function GithubSnapshotBar({
             fillColor="rate_limit_fill"
             emptyColor="rate_limit_empty"
           />
-          <Text color={limitReached ? 'red' : undefined}>{usedText}</Text>
+          {usedText ? (
+            <Text color={limitReached ? 'red' : undefined}>{usedText}</Text>
+          ) : null}
         </Box>
         {remainingText ? <Text dimColor>{remainingText}</Text> : null}
         {limitReached ? <Text color="red">Limit reached!</Text> : null}
@@ -581,24 +583,20 @@ function GithubSnapshotBar({
     )
   }
 
+  // ── Narrow layout ─────────────────────────────────────────────────────
   return (
     <Box flexDirection="column">
-      <Text>
-        <Text bold>{displayName}</Text>
-        {remainingText ? (
-          <>
-            <Text> </Text>
-            <Text dimColor>- {remainingText}</Text>
-          </>
-        ) : null}
-      </Text>
+      <Text bold>{displayName}</Text>
       <ProgressBar
         ratio={normalized / 100}
         width={maxWidth}
         fillColor="rate_limit_fill"
         emptyColor="rate_limit_empty"
       />
-      <Text color={limitReached ? 'red' : undefined}>{usedText}</Text>
+      {usedText ? (
+        <Text color={limitReached ? 'red' : undefined}>{usedText}</Text>
+      ) : null}
+      {remainingText ? <Text dimColor>{remainingText}</Text> : null}
       {limitReached ? <Text color="red">Limit reached!</Text> : null}
     </Box>
   )
@@ -610,6 +608,13 @@ type GithubAccountUsageResult = {
   error?: string
 }
 
+/**
+ * Container for all GitHub usage bars for a single account.
+ *
+ * Renders metadata (account, plan, endpoint, model) followed by one bar
+ * per quota snapshot.  Uses a proper <Box> container — NOT a Fragment —
+ * to ensure Ink's layout engine measures children correctly.
+ */
 function GithubUsageBars({
   usage,
   maxWidth,
@@ -617,79 +622,66 @@ function GithubUsageBars({
   usage: GithubUsageData
   maxWidth: number
 }): React.ReactNode {
-  const elements: React.ReactNode[] = []
+  // planType may contain newlines from formatPlanType — only show the first line
+  const planLine = usage.planType?.split('\n')[0]
 
   // Per-snapshot bars (preferred — gives one bar per quota category)
   const snapshots = usage.quotaSnapshots
-  if (snapshots && snapshots.length > 0) {
-    for (const snap of snapshots) {
-      elements.push(
-        <GithubSnapshotBar
-          key={`snap-${snap.name}`}
-          snapshot={snap}
-          maxWidth={maxWidth}
-        />,
-      )
-    }
-  } else {
-    // Fallback: render the primary window (requests / tokens)
-    if (usage.requests) {
-      elements.push(
-        <GithubUsageBar
-          key="requests"
-          title="Requests"
-          window={usage.requests}
-          maxWidth={maxWidth}
-        />,
-      )
-    }
-
-    if (usage.tokens) {
-      elements.push(
-        <GithubUsageBar
-          key="tokens"
-          title="Tokens"
-          window={usage.tokens}
-          maxWidth={maxWidth}
-        />,
-      )
-    }
-  }
-
-  // If no bars would render, show a status message
-  if (elements.length === 0) {
-    elements.push(
-      <Text key="no-quota" dimColor>
-        No usage quota data is available for this account.
-      </Text>,
-    )
-  }
+  const hasSnapshots = snapshots !== undefined && snapshots.length > 0
 
   // Reset date (shown once, not per-snapshot)
   const resetsAt = usage.requests?.resetsAt
-  if (resetsAt) {
-    elements.push(
-      <Text key="resets" dimColor>
-        Resets {formatResetText(resetsAt, true, true)}
-      </Text>,
-    )
-  }
 
   return (
-    <>
+    <Box flexDirection="column" gap={1}>
       {usage.accountUsername ? (
         <Text dimColor>
           Account: @{usage.accountUsername}
           {usage.accountId ? ` (${usage.accountId})` : ''}
         </Text>
       ) : null}
-      {usage.planType ? (
-        <Text dimColor>Plan: {usage.planType.split('\n')[0]}</Text>
-      ) : null}
+      {planLine ? <Text dimColor>Plan: {planLine}</Text> : null}
       <Text dimColor>Endpoint: {usage.endpoint}</Text>
       <Text dimColor>Model: {usage.model}</Text>
-      {elements}
-    </>
+
+      {hasSnapshots
+        ? snapshots.map(snap => (
+            <GithubSnapshotBar
+              key={`snap-${snap.name}`}
+              snapshot={snap}
+              maxWidth={maxWidth}
+            />
+          ))
+        : null}
+
+      {!hasSnapshots && usage.requests ? (
+        <GithubUsageBar
+          key="requests"
+          title="Requests"
+          window={usage.requests}
+          maxWidth={maxWidth}
+        />
+      ) : null}
+
+      {!hasSnapshots && usage.tokens ? (
+        <GithubUsageBar
+          key="tokens"
+          title="Tokens"
+          window={usage.tokens}
+          maxWidth={maxWidth}
+        />
+      ) : null}
+
+      {!hasSnapshots && !usage.requests && !usage.tokens ? (
+        <Text dimColor>No usage quota data is available for this account.</Text>
+      ) : null}
+
+      {resetsAt ? (
+        <Text dimColor>
+          Resets {formatResetText(resetsAt, true, true)}
+        </Text>
+      ) : null}
+    </Box>
   )
 }
 
