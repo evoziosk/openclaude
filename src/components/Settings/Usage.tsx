@@ -644,6 +644,31 @@ function GithubUsageBars({
       <Text dimColor>Endpoint: {usage.endpoint}</Text>
       <Text dimColor>Model: {usage.model}</Text>
 
+      {/* DEBUG: raw API payload — remove after bars are confirmed working */}
+      {usage._debug?.rawPayload ? (
+        <Text dimColor>
+          {'DEBUG quota_snapshots: ' +
+            JSON.stringify(
+              (usage._debug.rawPayload as Record<string, unknown>)
+                ?.quota_snapshots ?? 'MISSING',
+            )}
+        </Text>
+      ) : null}
+      {hasSnapshots ? (
+        <Text dimColor>
+          {'DEBUG parsed snapshots: ' +
+            JSON.stringify(
+              snapshots.map(s => ({
+                n: s.name,
+                e: s.entitlement,
+                r: s.remaining,
+                u: s.unlimited,
+                up: s.usedPercent,
+              })),
+            )}
+        </Text>
+      ) : null}
+
       {hasSnapshots
         ? snapshots.map(snap => (
             <GithubSnapshotBar
