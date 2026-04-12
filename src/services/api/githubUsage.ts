@@ -19,15 +19,6 @@ type GithubUserResponse = {
   login?: unknown
 }
 
-export type GithubUsageSnapshot = {
-  name: string
-  entitlement?: number
-  remaining?: number
-  percentRemaining?: number
-  unlimited: boolean
-  usedPercent?: number
-}
-
 export type GithubUsageWindow = {
   limit?: number
   remaining?: number
@@ -40,13 +31,21 @@ export type GithubUsageWindow = {
 export type GithubUsageData = {
   endpoint: string
   model: string
+  /**
+   * Multi-line plan description. First line is the plan name
+   * (e.g. "free educational quota - individual"), subsequent lines are
+   * per-category quota details (e.g. "- completions: unlimited",
+   * "- premium_interactions: 38/300").
+   */
   planType?: string
   accountId?: string
   accountUsername?: string
+  /** Single primary usage window — the finite quota with lowest remaining %.
+   *  undefined when ALL quotas are unlimited (no bar to show). */
   requests?: GithubUsageWindow
   tokens?: GithubUsageWindow
-  /** Individual quota snapshots for per-category rendering */
-  quotaSnapshots?: GithubUsageSnapshot[]
+  /** True when every quota category is unlimited */
+  allUnlimited?: boolean
   /** Raw API response for debug purposes */
   _debug?: {
     rawPayload?: unknown
@@ -258,15 +257,38 @@ function parseResetDateFromPayload(payload: CopilotUsageResponse): string | unde
 
 function formatPlanType(
   payload: CopilotUsageResponse,
-  _snapshots: ParsedQuotaSnapshot[],
+  snapshots: ParsedQuotaSnapshot[],
 ): string | undefined {
   const accessType = asString(payload.access_type_sku)
   const plan = asString(payload.copilot_plan)
 
+  // First line: "free educational quota - individual" (with underscores replaced)
+  let headline: string | undefined
   if (accessType && plan) {
-    return `${accessType} - ${plan}`
+    headline = `${accessType.replace(/_/g, ' ')} - ${plan}`
+  } else {
+    const raw = accessType ?? plan
+    headline = raw ? raw.replace(/_/g, ' ') : undefined
   }
-  return accessType ?? plan
+
+  // Build per-category quota detail lines from snapshots
+  if (snapshots.length === 0) {
+    return headline
+  }
+
+  const quotaEntries = snapshots.map(snap => {
+    if (snap.unlimited) {
+      return `- ${snap.name}: unlimited`
+    }
+    if (snap.entitlement !== undefined && snap.remaining !== undefined) {
+      const used = snap.entitlement - snap.remaining
+      return `- ${snap.name}: ${used.toLocaleString()}/${snap.entitlement.toLocaleString()}`
+    }
+    return `- ${snap.name}: unknown`
+  })
+
+  const quotaDetails = quotaEntries.join('\n')
+  return headline ? `${headline}\n${quotaDetails}` : quotaDetails
 }
 
 // ---------------------------------------------------------------------------
@@ -278,26 +300,27 @@ function normalizeCopilotUsage(
   user: GithubUserResponse | null,
 ): Pick<
   GithubUsageData,
-  'planType' | 'accountId' | 'accountUsername' | 'requests' | 'tokens' | 'quotaSnapshots'
+  'planType' | 'accountId' | 'accountUsername' | 'requests' | 'tokens' | 'allUnlimited'
 > {
   const snapshots = parseQuotaSnapshots(payload)
   const resetsAt = parseResetDateFromPayload(payload)
 
+  const accountId =
+    user && user.id !== undefined && user.id !== null
+      ? String(user.id)
+      : undefined
+  const accountUsername = asString(user?.login)
+  const planType = formatPlanType(payload, snapshots)
+
   // If quota_snapshots is missing, empty, or has no valid entries → unlimited
   if (snapshots.length === 0) {
     return {
-      planType: formatPlanType(payload, snapshots),
-      accountId:
-        user && user.id !== undefined && user.id !== null
-          ? String(user.id)
-          : undefined,
-      accountUsername: asString(user?.login),
-      requests: {
-        resetsAt,
-        unlimited: true,
-      },
+      planType,
+      accountId,
+      accountUsername,
+      requests: undefined,
       tokens: undefined,
-      quotaSnapshots: [],
+      allUnlimited: true,
     }
   }
 
@@ -305,24 +328,12 @@ function normalizeCopilotUsage(
   const allUnlimited = snapshots.every(snap => snap.unlimited)
   if (allUnlimited) {
     return {
-      planType: formatPlanType(payload, snapshots),
-      accountId:
-        user && user.id !== undefined && user.id !== null
-          ? String(user.id)
-          : undefined,
-      accountUsername: asString(user?.login),
-      requests: {
-        resetsAt,
-        unlimited: true,
-      },
+      planType,
+      accountId,
+      accountUsername,
+      requests: undefined,
       tokens: undefined,
-      quotaSnapshots: snapshots.map(snap => ({
-        name: snap.name,
-        entitlement: snap.entitlement,
-        remaining: snap.remaining,
-        percentRemaining: snap.percentRemaining,
-        unlimited: true,
-      })),
+      allUnlimited: true,
     }
   }
 
@@ -357,24 +368,12 @@ function normalizeCopilotUsage(
   }
 
   return {
-    planType: formatPlanType(payload, snapshots),
-    accountId:
-      user && user.id !== undefined && user.id !== null
-        ? String(user.id)
-        : undefined,
-    accountUsername: asString(user?.login),
+    planType,
+    accountId,
+    accountUsername,
     requests,
     tokens: undefined,
-    quotaSnapshots: snapshots.map(snap => ({
-      name: snap.name,
-      entitlement: snap.entitlement,
-      remaining: snap.remaining,
-      percentRemaining: snap.percentRemaining,
-      unlimited: snap.unlimited,
-      usedPercent: snap.percentRemaining !== undefined
-        ? clampPercent(100 - snap.percentRemaining)
-        : undefined,
-    })),
+    allUnlimited: false,
   }
 }
 
@@ -459,16 +458,19 @@ export function parseGithubUsageHeaders(
 // ---------------------------------------------------------------------------
 
 export function hasGithubUsageQuotaData(usage: GithubUsageData): boolean {
+  // allUnlimited means we have quota data (all unlimited) — it's still valid data
+  if (usage.allUnlimited) {
+    return true
+  }
+
   const requests = usage.requests
   const tokens = usage.tokens
 
   const hasRequests =
-    requests?.unlimited === true ||
     requests?.usedPercent !== undefined ||
     requests?.remaining !== undefined ||
     requests?.limit !== undefined
   const hasTokens =
-    tokens?.unlimited === true ||
     tokens?.usedPercent !== undefined ||
     tokens?.remaining !== undefined ||
     tokens?.limit !== undefined

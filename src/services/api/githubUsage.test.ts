@@ -127,17 +127,17 @@ describe('fetchGithubUsage', () => {
     expect(calls).toContain('https://api.github.com/copilot_internal/user')
     expect(calls).toContain('https://api.github.com/user')
     expect(result.endpoint).toBe('https://api.github.com')
-    expect(result.planType).toContain('business_seat - business')
+    // planType now embeds quota details with underscores replaced
+    expect(result.planType).toContain('business seat - business')
+    expect(result.planType).toContain('- chat: 40/100')
+    expect(result.planType).toContain('- completions: 45/50')
     expect(result.accountId).toBe('12345')
     expect(result.accountUsername).toBe('octocat')
     // Primary quota should be "completions" (lowest percent_remaining = 10)
     expect(result.requests?.limit).toBe(50)
     expect(result.requests?.remaining).toBe(5)
     expect(result.requests?.usedPercent).toBe(90)
-    // Should include per-snapshot data
-    expect(result.quotaSnapshots).toHaveLength(2)
-    expect(result.quotaSnapshots?.[0]?.name).toBe('chat')
-    expect(result.quotaSnapshots?.[1]?.name).toBe('completions')
+    expect(result.allUnlimited).toBe(false)
     // Debug info should be present
     expect(result._debug?.tokenType).toBe('oauth')
     expect(result._debug?.rawPayload).toBeDefined()
@@ -169,7 +169,7 @@ describe('fetchGithubUsage', () => {
   })
 })
 
-test('fetchGithubUsage marks requests as unlimited when all quota snapshots are unlimited', async () => {
+test('fetchGithubUsage sets allUnlimited when all quota snapshots are unlimited', async () => {
   const fetchImpl: FetchGithubUsageOptions['fetchImpl'] = async (
     input: RequestInfo | URL,
     _init?: RequestInit,
@@ -212,18 +212,16 @@ test('fetchGithubUsage marks requests as unlimited when all quota snapshots are 
     fetchImpl,
   })
 
-  expect(result.planType).toContain('free_educational_quota - individual')
-  expect(result.requests?.unlimited).toBe(true)
-  expect(result.requests?.usedPercent).toBeUndefined()
-  // Should have a resetsAt from quota_reset_date_utc
-  expect(result.requests?.resetsAt).toBe('2026-05-01T00:00:00.000Z')
-  // All snapshots should be marked unlimited
-  expect(result.quotaSnapshots).toHaveLength(2)
-  expect(result.quotaSnapshots?.[0]?.unlimited).toBe(true)
-  expect(result.quotaSnapshots?.[1]?.unlimited).toBe(true)
+  // planType should embed quota details
+  expect(result.planType).toContain('free educational quota - individual')
+  expect(result.planType).toContain('- chat: unlimited')
+  expect(result.planType).toContain('- completions: unlimited')
+  // All unlimited → requests is undefined, allUnlimited is true
+  expect(result.allUnlimited).toBe(true)
+  expect(result.requests).toBeUndefined()
 })
 
-test('fetchGithubUsage returns unlimited when quota_snapshots is missing entirely', async () => {
+test('fetchGithubUsage returns allUnlimited when quota_snapshots is missing entirely', async () => {
   const fetchImpl: FetchGithubUsageOptions['fetchImpl'] = async (
     input: RequestInfo | URL,
     _init?: RequestInit,
@@ -252,11 +250,11 @@ test('fetchGithubUsage returns unlimited when quota_snapshots is missing entirel
     fetchImpl,
   })
 
-  expect(result.requests?.unlimited).toBe(true)
-  expect(result.quotaSnapshots).toHaveLength(0)
+  expect(result.allUnlimited).toBe(true)
+  expect(result.requests).toBeUndefined()
 })
 
-test('fetchGithubUsage returns unlimited when quota_snapshots is empty object', async () => {
+test('fetchGithubUsage returns allUnlimited when quota_snapshots is empty object', async () => {
   const fetchImpl: FetchGithubUsageOptions['fetchImpl'] = async (
     input: RequestInfo | URL,
     _init?: RequestInit,
@@ -285,8 +283,8 @@ test('fetchGithubUsage returns unlimited when quota_snapshots is empty object', 
     fetchImpl,
   })
 
-  expect(result.requests?.unlimited).toBe(true)
-  expect(result.quotaSnapshots).toHaveLength(0)
+  expect(result.allUnlimited).toBe(true)
+  expect(result.requests).toBeUndefined()
 })
 
 test('fetchGithubUsage prefers finite quota snapshot over unlimited one', async () => {
@@ -332,16 +330,13 @@ test('fetchGithubUsage prefers finite quota snapshot over unlimited one', async 
   })
 
   // Should pick the finite "completions" snapshot, not the unlimited "chat" one
-  expect(result.requests?.unlimited).toBeUndefined()
+  expect(result.allUnlimited).toBe(false)
   expect(result.requests?.limit).toBe(200)
   expect(result.requests?.remaining).toBe(80)
   expect(result.requests?.usedPercent).toBe(60)
-  // Per-snapshot data should show both
-  expect(result.quotaSnapshots).toHaveLength(2)
-  expect(result.quotaSnapshots?.[0]?.name).toBe('chat')
-  expect(result.quotaSnapshots?.[0]?.unlimited).toBe(true)
-  expect(result.quotaSnapshots?.[1]?.name).toBe('completions')
-  expect(result.quotaSnapshots?.[1]?.usedPercent).toBe(60)
+  // planType should contain both quota details
+  expect(result.planType).toContain('- chat: unlimited')
+  expect(result.planType).toContain('- completions: 120/200')
 })
 
 test('fetchGithubUsage includes limitReached flag when quota is exhausted', async () => {
@@ -384,7 +379,7 @@ test('fetchGithubUsage includes limitReached flag when quota is exhausted', asyn
   expect(result.requests?.limitReached).toBe(true)
 })
 
-test('fetchGithubUsage treats snapshot with unlimited:true but finite entitlement as finite', async () => {
+test('fetchGithubUsage picks primary from finite snapshot when mix of unlimited and finite', async () => {
   // This matches real API behavior: free_educational_quota returns unlimited:true
   // on ALL snapshots, even premium_interactions which has entitlement=300, remaining=262.
   // Truly unlimited categories have entitlement:0, remaining:0, percent_remaining:100.
@@ -436,25 +431,20 @@ test('fetchGithubUsage treats snapshot with unlimited:true but finite entitlemen
     fetchImpl,
   })
 
-  // premium_interactions has finite entitlement, so should NOT be treated as unlimited
-  expect(result.quotaSnapshots).toHaveLength(3)
+  // Not all unlimited — premium_interactions has finite entitlement
+  expect(result.allUnlimited).toBe(false)
 
-  const chatSnap = result.quotaSnapshots?.find(s => s.name === 'chat')
-  expect(chatSnap?.unlimited).toBe(true)
+  // planType should embed all quota details
+  expect(result.planType).toContain('free educational quota - individual')
+  expect(result.planType).toContain('- chat: unlimited')
+  expect(result.planType).toContain('- completions: unlimited')
+  expect(result.planType).toContain('- premium_interactions: 38/300')
 
-  const completionsSnap = result.quotaSnapshots?.find(s => s.name === 'completions')
-  expect(completionsSnap?.unlimited).toBe(true)
-
-  const premiumSnap = result.quotaSnapshots?.find(s => s.name === 'premium_interactions')
-  expect(premiumSnap?.unlimited).toBe(false)
-  expect(premiumSnap?.entitlement).toBe(300)
-  expect(premiumSnap?.remaining).toBe(262)
-  // usedPercent should be 100 - 87.3 = 12.7
-  expect(premiumSnap?.usedPercent).toBeGreaterThan(12)
-  expect(premiumSnap?.usedPercent).toBeLessThan(13)
-
-  // Not all unlimited anymore, so requests should pick premium_interactions as primary
-  expect(result.requests?.unlimited).toBeUndefined()
+  // Primary should be premium_interactions (the only finite quota)
   expect(result.requests?.limit).toBe(300)
   expect(result.requests?.remaining).toBe(262)
+  // usedPercent should be 100 - 87.3 = 12.7
+  expect(result.requests?.usedPercent).toBeGreaterThan(12)
+  expect(result.requests?.usedPercent).toBeLessThan(13)
+  expect(result.requests?.resetsAt).toBe('2026-05-01T00:00:00.000Z')
 })
