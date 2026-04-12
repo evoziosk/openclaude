@@ -11,6 +11,7 @@ import {
   type GithubUsageData,
   fetchGithubUsage,
   type GithubUsageWindow,
+  type GithubQuotaDetail,
 } from '../../services/api/githubUsage.js'
 import {
   GITHUB_COPILOT_BASE_URL,
@@ -506,11 +507,10 @@ type GithubAccountUsageResult = {
  *
  * Renders:
  * 1. Account metadata (username, id)
- * 2. Plan type lines (first line = plan name, subsequent lines = per-category
- *    quota summaries like "- completions: unlimited", "- premium_interactions: 38/300")
- * 3. A single progress bar for the primary finite quota (if any exists)
- *    — the bar is only rendered when requests is defined (not all-unlimited)
- * 4. Reset date only appears as part of the bar subtext (not standalone)
+ * 2. Plan name (single line)
+ * 3. Per-category quota details from quotaDetails array
+ *    (e.g. "- completions: unlimited", "- premium_interactions: 38/300")
+ * 4. A single progress bar for the primary finite quota (if any exists)
  * 5. "Credits: unlimited plan" when all quotas are unlimited
  */
 function GithubUsageBars({
@@ -520,8 +520,7 @@ function GithubUsageBars({
   usage: GithubUsageData
   maxWidth: number
 }): React.ReactNode {
-  // planType is multiline: first line = plan name, rest = per-category details
-  const planLines = usage.planType?.split('\n') ?? []
+  const quotaDetails = usage.quotaDetails ?? []
 
   return (
     <Box flexDirection="column" gap={1}>
@@ -532,12 +531,15 @@ function GithubUsageBars({
         </Text>
       ) : null}
 
-      {/* Plan type lines — rendered as individual Text elements */}
-      {planLines.length > 0 ? (
+      {/* Plan name (single line) + per-category quota details */}
+      {usage.planType || quotaDetails.length > 0 ? (
         <Box flexDirection="column">
-          {planLines.map((line, index) => (
-            <Text key={index} dimColor>
-              {index === 0 ? `Plan: ${line}` : line}
+          {usage.planType ? (
+            <Text dimColor>Plan: {usage.planType}</Text>
+          ) : null}
+          {quotaDetails.map(detail => (
+            <Text key={detail.name} dimColor>
+              {'  '}- {detail.name}: {detail.label}
             </Text>
           ))}
         </Box>

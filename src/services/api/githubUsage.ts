@@ -28,18 +28,22 @@ export type GithubUsageWindow = {
   limitReached?: boolean
 }
 
+/** Per-category quota detail for display (e.g. "chat: unlimited", "premium_interactions: 38/300") */
+export type GithubQuotaDetail = {
+  name: string
+  label: string // e.g. "unlimited" or "38/300"
+  unlimited: boolean
+}
+
 export type GithubUsageData = {
   endpoint: string
   model: string
-  /**
-   * Multi-line plan description. First line is the plan name
-   * (e.g. "free educational quota - individual"), subsequent lines are
-   * per-category quota details (e.g. "- completions: unlimited",
-   * "- premium_interactions: 38/300").
-   */
+  /** Plan name, single line (e.g. "free educational quota - individual") */
   planType?: string
   accountId?: string
   accountUsername?: string
+  /** Per-category quota summaries for display */
+  quotaDetails?: GithubQuotaDetail[]
   /** Single primary usage window — the finite quota with lowest remaining %.
    *  undefined when ALL quotas are unlimited (no bar to show). */
   requests?: GithubUsageWindow
@@ -255,40 +259,32 @@ function parseResetDateFromPayload(payload: CopilotUsageResponse): string | unde
   return date.toISOString()
 }
 
-function formatPlanType(
-  payload: CopilotUsageResponse,
-  snapshots: ParsedQuotaSnapshot[],
-): string | undefined {
+function formatPlanType(payload: CopilotUsageResponse): string | undefined {
   const accessType = asString(payload.access_type_sku)
   const plan = asString(payload.copilot_plan)
 
-  // First line: "free educational quota - individual" (with underscores replaced)
-  let headline: string | undefined
   if (accessType && plan) {
-    headline = `${accessType.replace(/_/g, ' ')} - ${plan}`
-  } else {
-    const raw = accessType ?? plan
-    headline = raw ? raw.replace(/_/g, ' ') : undefined
+    return `${accessType.replace(/_/g, ' ')} - ${plan}`
   }
+  const raw = accessType ?? plan
+  return raw ? raw.replace(/_/g, ' ') : undefined
+}
 
-  // Build per-category quota detail lines from snapshots
-  if (snapshots.length === 0) {
-    return headline
-  }
-
-  const quotaEntries = snapshots.map(snap => {
+function buildQuotaDetails(snapshots: ParsedQuotaSnapshot[]): GithubQuotaDetail[] {
+  return snapshots.map(snap => {
     if (snap.unlimited) {
-      return `- ${snap.name}: unlimited`
+      return { name: snap.name, label: 'unlimited', unlimited: true }
     }
     if (snap.entitlement !== undefined && snap.remaining !== undefined) {
       const used = snap.entitlement - snap.remaining
-      return `- ${snap.name}: ${used.toLocaleString()}/${snap.entitlement.toLocaleString()}`
+      return {
+        name: snap.name,
+        label: `${used.toLocaleString()}/${snap.entitlement.toLocaleString()}`,
+        unlimited: false,
+      }
     }
-    return `- ${snap.name}: unknown`
+    return { name: snap.name, label: 'unknown', unlimited: false }
   })
-
-  const quotaDetails = quotaEntries.join('\n')
-  return headline ? `${headline}\n${quotaDetails}` : quotaDetails
 }
 
 // ---------------------------------------------------------------------------
@@ -300,7 +296,7 @@ function normalizeCopilotUsage(
   user: GithubUserResponse | null,
 ): Pick<
   GithubUsageData,
-  'planType' | 'accountId' | 'accountUsername' | 'requests' | 'tokens' | 'allUnlimited'
+  'planType' | 'quotaDetails' | 'accountId' | 'accountUsername' | 'requests' | 'tokens' | 'allUnlimited'
 > {
   const snapshots = parseQuotaSnapshots(payload)
   const resetsAt = parseResetDateFromPayload(payload)
@@ -310,12 +306,14 @@ function normalizeCopilotUsage(
       ? String(user.id)
       : undefined
   const accountUsername = asString(user?.login)
-  const planType = formatPlanType(payload, snapshots)
+  const planType = formatPlanType(payload)
+  const quotaDetails = buildQuotaDetails(snapshots)
 
   // If quota_snapshots is missing, empty, or has no valid entries → unlimited
   if (snapshots.length === 0) {
     return {
       planType,
+      quotaDetails,
       accountId,
       accountUsername,
       requests: undefined,
@@ -329,6 +327,7 @@ function normalizeCopilotUsage(
   if (allUnlimited) {
     return {
       planType,
+      quotaDetails,
       accountId,
       accountUsername,
       requests: undefined,
@@ -369,6 +368,7 @@ function normalizeCopilotUsage(
 
   return {
     planType,
+    quotaDetails,
     accountId,
     accountUsername,
     requests,

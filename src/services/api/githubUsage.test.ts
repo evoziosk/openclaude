@@ -127,10 +127,12 @@ describe('fetchGithubUsage', () => {
     expect(calls).toContain('https://api.github.com/copilot_internal/user')
     expect(calls).toContain('https://api.github.com/user')
     expect(result.endpoint).toBe('https://api.github.com')
-    // planType now embeds quota details with underscores replaced
-    expect(result.planType).toContain('business seat - business')
-    expect(result.planType).toContain('- chat: 40/100')
-    expect(result.planType).toContain('- completions: 45/50')
+    // planType is single-line plan name only
+    expect(result.planType).toBe('business seat - business')
+    // quotaDetails has per-category info
+    expect(result.quotaDetails).toHaveLength(2)
+    expect(result.quotaDetails?.[0]).toEqual({ name: 'chat', label: '40/100', unlimited: false })
+    expect(result.quotaDetails?.[1]).toEqual({ name: 'completions', label: '45/50', unlimited: false })
     expect(result.accountId).toBe('12345')
     expect(result.accountUsername).toBe('octocat')
     // Primary quota should be "completions" (lowest percent_remaining = 10)
@@ -212,10 +214,12 @@ test('fetchGithubUsage sets allUnlimited when all quota snapshots are unlimited'
     fetchImpl,
   })
 
-  // planType should embed quota details
-  expect(result.planType).toContain('free educational quota - individual')
-  expect(result.planType).toContain('- chat: unlimited')
-  expect(result.planType).toContain('- completions: unlimited')
+  // planType is single-line plan name
+  expect(result.planType).toBe('free educational quota - individual')
+  // quotaDetails has per-category info
+  expect(result.quotaDetails).toHaveLength(2)
+  expect(result.quotaDetails?.[0]).toEqual({ name: 'chat', label: 'unlimited', unlimited: true })
+  expect(result.quotaDetails?.[1]).toEqual({ name: 'completions', label: 'unlimited', unlimited: true })
   // All unlimited → requests is undefined, allUnlimited is true
   expect(result.allUnlimited).toBe(true)
   expect(result.requests).toBeUndefined()
@@ -334,9 +338,10 @@ test('fetchGithubUsage prefers finite quota snapshot over unlimited one', async 
   expect(result.requests?.limit).toBe(200)
   expect(result.requests?.remaining).toBe(80)
   expect(result.requests?.usedPercent).toBe(60)
-  // planType should contain both quota details
-  expect(result.planType).toContain('- chat: unlimited')
-  expect(result.planType).toContain('- completions: 120/200')
+  // quotaDetails should contain both categories
+  expect(result.quotaDetails).toHaveLength(2)
+  expect(result.quotaDetails?.[0]).toEqual({ name: 'chat', label: 'unlimited', unlimited: true })
+  expect(result.quotaDetails?.[1]).toEqual({ name: 'completions', label: '120/200', unlimited: false })
 })
 
 test('fetchGithubUsage includes limitReached flag when quota is exhausted', async () => {
@@ -434,11 +439,13 @@ test('fetchGithubUsage picks primary from finite snapshot when mix of unlimited 
   // Not all unlimited — premium_interactions has finite entitlement
   expect(result.allUnlimited).toBe(false)
 
-  // planType should embed all quota details
-  expect(result.planType).toContain('free educational quota - individual')
-  expect(result.planType).toContain('- chat: unlimited')
-  expect(result.planType).toContain('- completions: unlimited')
-  expect(result.planType).toContain('- premium_interactions: 38/300')
+  // planType is single-line plan name
+  expect(result.planType).toBe('free educational quota - individual')
+  // quotaDetails has per-category info
+  expect(result.quotaDetails).toHaveLength(3)
+  expect(result.quotaDetails?.[0]).toEqual({ name: 'chat', label: 'unlimited', unlimited: true })
+  expect(result.quotaDetails?.[1]).toEqual({ name: 'completions', label: 'unlimited', unlimited: true })
+  expect(result.quotaDetails?.[2]).toEqual({ name: 'premium_interactions', label: '38/300', unlimited: false })
 
   // Primary should be premium_interactions (the only finite quota)
   expect(result.requests?.limit).toBe(300)
