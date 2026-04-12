@@ -9,6 +9,7 @@ import { Box, Text } from '../../ink.js'
 import { useKeybinding } from '../../keybindings/useKeybinding.js'
 import {
   type GithubUsageData,
+  type GithubUsageSnapshot,
   fetchGithubUsage,
   type GithubUsageWindow,
 } from '../../services/api/githubUsage.js'
@@ -31,8 +32,8 @@ import {
 import { getAPIProvider } from '../../utils/model/providers.js'
 import {
   getProviderProfiles,
-  type ProviderProfile,
 } from '../../utils/providerProfiles.js'
+import type { ProviderProfile } from '../../utils/config.js'
 import {
   listGithubModelsAccounts,
   withGithubModelAccount,
@@ -408,7 +409,7 @@ function GithubUsageBar({
     return (
       <Box flexDirection="column">
         <Text bold>{title}</Text>
-        <Text>Unlimited</Text>
+        <Text color="green">Unlimited</Text>
         {subtext ? <Text dimColor>{subtext}</Text> : null}
       </Box>
     )
@@ -441,6 +442,7 @@ function GithubUsageBar({
 
   const normalized = Math.max(0, Math.min(100, usedPercent))
   const usedText = `${Math.floor(normalized)}% used`
+  const limitReached = window.limitReached
   const remainingText =
     window.remaining !== undefined
       ? `${window.remaining.toLocaleString()} remaining`
@@ -463,9 +465,10 @@ function GithubUsageBar({
             fillColor="rate_limit_fill"
             emptyColor="rate_limit_empty"
           />
-          <Text>{usedText}</Text>
+          <Text color={limitReached ? 'red' : undefined}>{usedText}</Text>
         </Box>
         {subtext ? <Text dimColor>{subtext}</Text> : null}
+        {limitReached ? <Text color="red">Limit reached!</Text> : null}
       </Box>
     )
   }
@@ -487,7 +490,110 @@ function GithubUsageBar({
         fillColor="rate_limit_fill"
         emptyColor="rate_limit_empty"
       />
-      <Text>{usedText}</Text>
+      <Text color={limitReached ? 'red' : undefined}>{usedText}</Text>
+      {limitReached ? <Text color="red">Limit reached!</Text> : null}
+    </Box>
+  )
+}
+
+function GithubSnapshotBar({
+  snapshot,
+  maxWidth,
+}: {
+  snapshot: GithubUsageSnapshot
+  maxWidth: number
+}): React.ReactNode {
+  const displayName = snapshot.name.charAt(0).toUpperCase() + snapshot.name.slice(1)
+
+  if (snapshot.unlimited) {
+    return (
+      <Box flexDirection="column">
+        <Text bold>{displayName}</Text>
+        <Text color="green">Unlimited</Text>
+      </Box>
+    )
+  }
+
+  // Compute usedPercent from service data, or from remaining/entitlement as fallback
+  let usedPercent = snapshot.usedPercent
+  if (
+    usedPercent === undefined &&
+    snapshot.entitlement !== undefined &&
+    snapshot.entitlement > 0 &&
+    snapshot.remaining !== undefined
+  ) {
+    usedPercent = Math.max(
+      0,
+      Math.min(100, ((snapshot.entitlement - snapshot.remaining) / snapshot.entitlement) * 100),
+    )
+  }
+
+  if (usedPercent === undefined) {
+    const remainingText =
+      snapshot.remaining !== undefined && snapshot.entitlement !== undefined
+        ? `${snapshot.remaining.toLocaleString()} / ${snapshot.entitlement.toLocaleString()} remaining`
+        : snapshot.remaining !== undefined
+          ? `${snapshot.remaining.toLocaleString()} remaining`
+          : snapshot.entitlement !== undefined
+            ? `Limit: ${snapshot.entitlement.toLocaleString()}`
+            : 'Usage data unavailable'
+
+    return (
+      <Box flexDirection="column">
+        <Text bold>{displayName}</Text>
+        <Text dimColor>{remainingText}</Text>
+      </Box>
+    )
+  }
+
+  const normalized = Math.max(0, Math.min(100, usedPercent))
+  const usedText = `${Math.floor(normalized)}% used`
+  const limitReached = snapshot.percentRemaining !== undefined && snapshot.percentRemaining <= 0
+  const remainingText =
+    snapshot.remaining !== undefined && snapshot.entitlement !== undefined
+      ? `${snapshot.remaining.toLocaleString()} / ${snapshot.entitlement.toLocaleString()} remaining`
+      : snapshot.remaining !== undefined
+        ? `${snapshot.remaining.toLocaleString()} remaining`
+        : undefined
+
+  if (maxWidth >= 62) {
+    return (
+      <Box flexDirection="column">
+        <Text bold>{displayName}</Text>
+        <Box flexDirection="row" gap={1}>
+          <ProgressBar
+            ratio={normalized / 100}
+            width={50}
+            fillColor="rate_limit_fill"
+            emptyColor="rate_limit_empty"
+          />
+          <Text color={limitReached ? 'red' : undefined}>{usedText}</Text>
+        </Box>
+        {remainingText ? <Text dimColor>{remainingText}</Text> : null}
+        {limitReached ? <Text color="red">Limit reached!</Text> : null}
+      </Box>
+    )
+  }
+
+  return (
+    <Box flexDirection="column">
+      <Text>
+        <Text bold>{displayName}</Text>
+        {remainingText ? (
+          <>
+            <Text> </Text>
+            <Text dimColor>- {remainingText}</Text>
+          </>
+        ) : null}
+      </Text>
+      <ProgressBar
+        ratio={normalized / 100}
+        width={maxWidth}
+        fillColor="rate_limit_fill"
+        emptyColor="rate_limit_empty"
+      />
+      <Text color={limitReached ? 'red' : undefined}>{usedText}</Text>
+      {limitReached ? <Text color="red">Limit reached!</Text> : null}
     </Box>
   )
 }
@@ -505,37 +611,60 @@ function GithubUsageBars({
   usage: GithubUsageData
   maxWidth: number
 }): React.ReactNode {
-  const requestBars: React.ReactNode[] = []
+  const elements: React.ReactNode[] = []
 
-  // Render requests bar
-  if (usage.requests) {
-    requestBars.push(
-      <GithubUsageBar
-        key="requests"
-        title="Monthly"
-        window={usage.requests}
-        maxWidth={maxWidth}
-      />,
-    )
-  }
+  // Per-snapshot bars (preferred — gives one bar per quota category)
+  const snapshots = usage.quotaSnapshots
+  if (snapshots && snapshots.length > 0) {
+    for (const snap of snapshots) {
+      elements.push(
+        <GithubSnapshotBar
+          key={`snap-${snap.name}`}
+          snapshot={snap}
+          maxWidth={maxWidth}
+        />,
+      )
+    }
+  } else {
+    // Fallback: render the primary window (requests / tokens)
+    if (usage.requests) {
+      elements.push(
+        <GithubUsageBar
+          key="requests"
+          title="Requests"
+          window={usage.requests}
+          maxWidth={maxWidth}
+        />,
+      )
+    }
 
-  // Render tokens bar
-  if (usage.tokens) {
-    requestBars.push(
-      <GithubUsageBar
-        key="tokens"
-        title="Tokens limit"
-        window={usage.tokens}
-        maxWidth={maxWidth}
-      />,
-    )
+    if (usage.tokens) {
+      elements.push(
+        <GithubUsageBar
+          key="tokens"
+          title="Tokens"
+          window={usage.tokens}
+          maxWidth={maxWidth}
+        />,
+      )
+    }
   }
 
   // If no bars would render, show a status message
-  if (requestBars.length === 0) {
-    requestBars.push(
+  if (elements.length === 0) {
+    elements.push(
       <Text key="no-quota" dimColor>
         No usage quota data is available for this account.
+      </Text>,
+    )
+  }
+
+  // Reset date (shown once, not per-snapshot)
+  const resetsAt = usage.requests?.resetsAt
+  if (resetsAt) {
+    elements.push(
+      <Text key="resets" dimColor>
+        Resets {formatResetText(resetsAt, true, true)}
       </Text>,
     )
   }
@@ -548,10 +677,12 @@ function GithubUsageBars({
           {usage.accountId ? ` (${usage.accountId})` : ''}
         </Text>
       ) : null}
-      {usage.planType ? <Text dimColor>Plan: {usage.planType}</Text> : null}
+      {usage.planType ? (
+        <Text dimColor>Plan: {usage.planType.split('\n')[0]}</Text>
+      ) : null}
       <Text dimColor>Endpoint: {usage.endpoint}</Text>
       <Text dimColor>Model: {usage.model}</Text>
-      {requestBars}
+      {elements}
     </>
   )
 }
@@ -706,7 +837,7 @@ function GithubUsage({
             flexDirection="column"
             gap={1}
             borderStyle={hasMultipleAccounts ? 'round' : undefined}
-            borderColor={hasMultipleAccounts ? 'dim' : undefined}
+            borderColor={hasMultipleAccounts ? 'inactive' : undefined}
             paddingX={hasMultipleAccounts ? 1 : 0}
           >
             <Text bold>
