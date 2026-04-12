@@ -218,17 +218,25 @@ function parseQuotaSnapshots(payload: CopilotUsageResponse): ParsedQuotaSnapshot
       percentRemaining = clampPercent((remaining / entitlement) * 100)
     }
 
+    // The API returns unlimited:true for genuinely unlimited categories
+    // (chat, completions) AND sometimes for categories with finite quotas
+    // (premium_interactions with entitlement=300, remaining=262).
+    //
+    // For truly unlimited categories the API sends entitlement:0, remaining:0
+    // (NOT null/undefined). So:
+    //   - If unlimited:true AND entitlement > 0 → finite (has real quota)
+    //   - If unlimited:true AND entitlement <= 0 or missing → truly unlimited
+    //   - If unlimited:false → always finite
+    const isUnlimited =
+      Boolean(record.unlimited) &&
+      (entitlement === undefined || entitlement <= 0)
+
     snapshots.push({
       name,
       entitlement,
       remaining,
       percentRemaining,
-      // Only treat as truly unlimited if there are no finite entitlement/remaining values.
-      // The API may return unlimited:true even for snapshots with finite quotas
-      // (e.g. premium_requests with entitlement=300, remaining=262, unlimited=true).
-      unlimited: Boolean(record.unlimited) &&
-        (entitlement === undefined || entitlement <= 0) &&
-        (remaining === undefined),
+      unlimited: isUnlimited,
     })
   }
 

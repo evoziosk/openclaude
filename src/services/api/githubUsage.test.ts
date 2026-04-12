@@ -184,15 +184,15 @@ test('fetchGithubUsage marks requests as unlimited when all quota snapshots are 
           quota_reset_date_utc: '2026-05-01T00:00:00.000Z',
           quota_snapshots: {
             chat: {
-              entitlement: null,
-              remaining: null,
-              percent_remaining: null,
+              entitlement: 0,
+              remaining: 0,
+              percent_remaining: 100,
               unlimited: true,
             },
             completions: {
-              entitlement: null,
-              remaining: null,
-              percent_remaining: null,
+              entitlement: 0,
+              remaining: 0,
+              percent_remaining: 100,
               unlimited: true,
             },
           },
@@ -303,8 +303,9 @@ test('fetchGithubUsage prefers finite quota snapshot over unlimited one', async 
           copilot_plan: 'business',
           quota_snapshots: {
             chat: {
-              entitlement: null,
-              remaining: null,
+              entitlement: 0,
+              remaining: 0,
+              percent_remaining: 100,
               unlimited: true,
             },
             completions: {
@@ -385,7 +386,8 @@ test('fetchGithubUsage includes limitReached flag when quota is exhausted', asyn
 
 test('fetchGithubUsage treats snapshot with unlimited:true but finite entitlement as finite', async () => {
   // This matches real API behavior: free_educational_quota returns unlimited:true
-  // on ALL snapshots, even premium_requests which has entitlement=300, remaining=262
+  // on ALL snapshots, even premium_interactions which has entitlement=300, remaining=262.
+  // Truly unlimited categories have entitlement:0, remaining:0, percent_remaining:100.
   const fetchImpl: FetchGithubUsageOptions['fetchImpl'] = async (
     input: RequestInfo | URL,
     _init?: RequestInit,
@@ -400,22 +402,22 @@ test('fetchGithubUsage treats snapshot with unlimited:true but finite entitlemen
           quota_reset_date_utc: '2026-05-01T00:00:00.000Z',
           quota_snapshots: {
             chat: {
-              entitlement: null,
-              remaining: null,
-              percent_remaining: null,
+              entitlement: 0,
+              remaining: 0,
+              percent_remaining: 100,
               unlimited: true,
             },
             completions: {
-              entitlement: null,
-              remaining: null,
-              percent_remaining: null,
+              entitlement: 0,
+              remaining: 0,
+              percent_remaining: 100,
               unlimited: true,
             },
-            premium_requests: {
+            premium_interactions: {
               entitlement: 300,
               remaining: 262,
-              percent_remaining: null,
-              unlimited: true,
+              percent_remaining: 87.3,
+              unlimited: false,
             },
           },
         }),
@@ -434,7 +436,7 @@ test('fetchGithubUsage treats snapshot with unlimited:true but finite entitlemen
     fetchImpl,
   })
 
-  // premium_requests has finite entitlement, so should NOT be treated as unlimited
+  // premium_interactions has finite entitlement, so should NOT be treated as unlimited
   expect(result.quotaSnapshots).toHaveLength(3)
 
   const chatSnap = result.quotaSnapshots?.find(s => s.name === 'chat')
@@ -443,15 +445,15 @@ test('fetchGithubUsage treats snapshot with unlimited:true but finite entitlemen
   const completionsSnap = result.quotaSnapshots?.find(s => s.name === 'completions')
   expect(completionsSnap?.unlimited).toBe(true)
 
-  const premiumSnap = result.quotaSnapshots?.find(s => s.name === 'premium_requests')
+  const premiumSnap = result.quotaSnapshots?.find(s => s.name === 'premium_interactions')
   expect(premiumSnap?.unlimited).toBe(false)
   expect(premiumSnap?.entitlement).toBe(300)
   expect(premiumSnap?.remaining).toBe(262)
-  // usedPercent should be computed: (300-262)/300 * 100 = 12.67
+  // usedPercent should be 100 - 87.3 = 12.7
   expect(premiumSnap?.usedPercent).toBeGreaterThan(12)
   expect(premiumSnap?.usedPercent).toBeLessThan(13)
 
-  // Not all unlimited anymore, so requests should pick premium_requests as primary
+  // Not all unlimited anymore, so requests should pick premium_interactions as primary
   expect(result.requests?.unlimited).toBeUndefined()
   expect(result.requests?.limit).toBe(300)
   expect(result.requests?.remaining).toBe(262)

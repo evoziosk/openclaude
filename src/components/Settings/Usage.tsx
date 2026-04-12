@@ -514,15 +514,10 @@ function GithubSnapshotBar({
     snapshot.name.replace(/_/g, ' ').replace(/^./, c => c.toUpperCase())
 
   // ── Truly unlimited? ──────────────────────────────────────────────────
-  // The GitHub API sends unlimited:true on ALL snapshots, even ones with
-  // finite entitlement/remaining. Treat as unlimited ONLY when there are
-  // no finite values.
-  const isReallyUnlimited =
-    snapshot.unlimited &&
-    (snapshot.entitlement === undefined || snapshot.entitlement <= 0) &&
-    snapshot.remaining === undefined
-
-  if (isReallyUnlimited) {
+  // The service layer (parseQuotaSnapshots) already resolves unlimited
+  // correctly: unlimited:true AND entitlement <= 0 → truly unlimited.
+  // Trust that flag directly here.
+  if (snapshot.unlimited) {
     return (
       <Box flexDirection="column">
         <Text bold>{displayName}</Text>
@@ -643,31 +638,6 @@ function GithubUsageBars({
       {planLine ? <Text dimColor>Plan: {planLine}</Text> : null}
       <Text dimColor>Endpoint: {usage.endpoint}</Text>
       <Text dimColor>Model: {usage.model}</Text>
-
-      {/* DEBUG: raw API payload — remove after bars are confirmed working */}
-      {usage._debug?.rawPayload ? (
-        <Text dimColor>
-          {'DEBUG quota_snapshots: ' +
-            JSON.stringify(
-              (usage._debug.rawPayload as Record<string, unknown>)
-                ?.quota_snapshots ?? 'MISSING',
-            )}
-        </Text>
-      ) : null}
-      {hasSnapshots ? (
-        <Text dimColor>
-          {'DEBUG parsed snapshots: ' +
-            JSON.stringify(
-              snapshots.map(s => ({
-                n: s.name,
-                e: s.entitlement,
-                r: s.remaining,
-                u: s.unlimited,
-                up: s.usedPercent,
-              })),
-            )}
-        </Text>
-      ) : null}
 
       {hasSnapshots
         ? snapshots.map(snap => (
