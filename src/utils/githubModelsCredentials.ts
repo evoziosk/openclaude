@@ -497,14 +497,27 @@ export function saveGithubModelsToken(
   return secureStorage.update(merged as typeof prev)
 }
 
-export function clearGithubModelsToken(): { success: boolean; warning?: string } {
+export function removeGithubAccount(accountName: string | undefined): { success: boolean; warning?: string } {
   if (isBareMode()) {
-    return { success: true }
+    return { success: true };
   }
 
-  const secureStorage = getSecureStorage()
-  const prev = secureStorage.read() || {}
-  const next = { ...(prev as Record<string, unknown>) }
-  delete next[GITHUB_MODELS_STORAGE_KEY]
-  return secureStorage.update(next as typeof prev)
+  const secureStorage = getSecureStorage();
+  const prev = secureStorage.read() || {};
+  const prevBlob = (prev as Record<string, unknown>)[GITHUB_MODELS_STORAGE_KEY] as GithubModelsCredentialBlob | undefined;
+  const normalized = normalizeGithubCredentialBlob(prevBlob);
+
+  // Remove the specified account
+  const remainingAccounts = normalized.accounts.filter(account => account.accountName !== accountName);
+
+  const updatedBlob: GithubModelsCredentialBlob = {
+    activeAccountName: remainingAccounts[0]?.accountName,
+    accounts: remainingAccounts
+  };
+
+  const merged = {
+    ...(prev as Record<string, unknown>),
+    [GITHUB_MODELS_STORAGE_KEY]: updatedBlob
+  };
+  return secureStorage.update(merged as typeof prev);
 }

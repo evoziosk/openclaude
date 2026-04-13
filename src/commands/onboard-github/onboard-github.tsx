@@ -472,6 +472,10 @@ function OnboardGithub(props: {
         value: 'use-existing' as const,
       },
       {
+        label: 'Remove account',
+        value: 'remove-account' as const
+      },
+      {
         label: 'Connect another account',
         value: 'connect-another' as const,
       },
@@ -497,6 +501,17 @@ function OnboardGithub(props: {
             }
             if (v === 'use-existing') {
               activateExistingLogin()
+              return
+            }
+            if (v === 'remove-account') 
+              {
+                const removed = removeGithubAccount(getActiveGithubModelsAccountName())
+                if (!removed.success) {
+                setErrorMsg(removed.warning ?? 'Failed to remove the account.') 
+                setStep('error')
+                return
+              }
+              onDone('Account removed successfully.', { display: 'user' })
               return
             }
             void runDeviceFlow(undefined, true)

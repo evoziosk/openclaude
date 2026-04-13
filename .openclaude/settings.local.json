@@ -1,7 +1,19 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Read(//d/bahria_cms_app/**)",
+      "Bash(dir \"D:\\\\bahria_cms_app\")",
+      "Bash(dir:*)",
+      "Bash(Get-ChildItem -Recurse -Filter \"*.dart\" \"D:\\\\bahria_cms_app\\\\lib\")",
+      "Bash(Select-Object FullName)",
+      "Bash(Format-List)",
+      "Bash(Get-ChildItem -Recurse \"D:\\\\bahria_cms_app\\\\.github\")",
+      "Bash(powershell -Command \"Get-ChildItem -Recurse -Filter '*.dart' 'D:\\\\bahria_cms_app\\\\lib' | Select-Object -ExpandProperty FullName\")",
+      "Bash(powershell -Command \"Get-ChildItem -Recurse 'D:\\\\bahria_cms_app\\\\.github' | Select-Object -ExpandProperty FullName\")",
+      "Bash(powershell -Command \"Get-ChildItem -Recurse 'D:\\\\bahria_cms_app\\\\worker' | Select-Object -ExpandProperty FullName\")",
+      "Bash(bun run:*)",
+      "Bash(git add:*)"
     ]
   }
 }

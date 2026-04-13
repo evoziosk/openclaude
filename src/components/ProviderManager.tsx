@@ -21,7 +21,7 @@ import {
   recommendOllamaModel,
 } from '../utils/providerRecommendation.js'
 import {
-  clearGithubModelsToken,
+  removeGithubAccount,
   GITHUB_MODELS_HYDRATED_ENV_MARKER,
   hydrateGithubModelsTokenFromSecureStorage,
   readGithubModelsToken,
