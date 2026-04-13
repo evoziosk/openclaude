@@ -497,27 +497,60 @@ export function saveGithubModelsToken(
   return secureStorage.update(merged as typeof prev)
 }
 
-export function removeGithubAccount(accountName: string | undefined): { success: boolean; warning?: string } {
+export function clearGithubModelsToken(): {
+  success: boolean
+  warning?: string
+} {
   if (isBareMode()) {
-    return { success: true };
+    return { success: true }
   }
 
-  const secureStorage = getSecureStorage();
-  const prev = secureStorage.read() || {};
-  const prevBlob = (prev as Record<string, unknown>)[GITHUB_MODELS_STORAGE_KEY] as GithubModelsCredentialBlob | undefined;
-  const normalized = normalizeGithubCredentialBlob(prevBlob);
+  const secureStorage = getSecureStorage()
+  const prev = secureStorage.read() || {}
+  const next = { ...(prev as Record<string, unknown>) }
+  delete next[GITHUB_MODELS_STORAGE_KEY]
+  return secureStorage.update(next as typeof prev)
+}
 
-  // Remove the specified account
-  const remainingAccounts = normalized.accounts.filter(account => account.accountName !== accountName);
+export function removeGithubAccount(
+  accountName: string | undefined,
+): { success: boolean; warning?: string } {
+  if (isBareMode()) {
+    return { success: true }
+  }
+
+  const normalizedRequested = accountName?.trim()
+  if (!normalizedRequested) {
+    return { success: false, warning: 'No GitHub account selected.' }
+  }
+
+  const secureStorage = getSecureStorage()
+  const prev = secureStorage.read() || {}
+  const prevBlob = (prev as Record<string, unknown>)[
+    GITHUB_MODELS_STORAGE_KEY
+  ] as GithubModelsCredentialBlob | undefined
+  const normalized = normalizeGithubCredentialBlob(prevBlob)
+
+  const remainingAccounts = normalized.accounts.filter(
+    account =>
+      account.accountName.toLowerCase() !== normalizedRequested.toLowerCase(),
+  )
+
+  if (remainingAccounts.length === normalized.accounts.length) {
+    return {
+      success: false,
+      warning: `GitHub account '${normalizedRequested}' was not found.`,
+    }
+  }
 
   const updatedBlob: GithubModelsCredentialBlob = {
     activeAccountName: remainingAccounts[0]?.accountName,
-    accounts: remainingAccounts
-  };
+    accounts: remainingAccounts,
+  }
 
   const merged = {
     ...(prev as Record<string, unknown>),
-    [GITHUB_MODELS_STORAGE_KEY]: updatedBlob
-  };
-  return secureStorage.update(merged as typeof prev);
+    [GITHUB_MODELS_STORAGE_KEY]: updatedBlob,
+  }
+  return secureStorage.update(merged as typeof prev)
 }
