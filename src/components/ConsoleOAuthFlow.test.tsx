@@ -115,5 +115,5 @@ test('third-party provider branch opens the first-run provider manager', async (
   expect(output).toContain('Anthropic')
   expect(output).toContain('OpenAI')
   expect(output).toContain('Ollama')
-  expect(output).toContain('LM Studio')
+  expect(output).toContain('Codex')
 })

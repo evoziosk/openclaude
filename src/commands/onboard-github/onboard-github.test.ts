@@ -55,6 +55,7 @@ describe('onboarding auth precedence cleanup', () => {
   test('clears preexisting OpenAI auth when switching to GitHub', () => {
     const env: NodeJS.ProcessEnv = {
       CLAUDE_CODE_USE_OPENAI: '1',
+      CLAUDE_CODE_USE_MISTRAL: '1',
       OPENAI_MODEL: 'gpt-4o',
       OPENAI_API_KEY: 'sk-stale-openai-key',
       OPENAI_ORG: 'org-old',
@@ -62,6 +63,12 @@ describe('onboarding auth precedence cleanup', () => {
       OPENAI_ORGANIZATION: 'org-legacy',
       OPENAI_BASE_URL: 'https://api.openai.com/v1',
       OPENAI_API_BASE: 'https://api.openai.com/v1',
+      MISTRAL_BASE_URL: 'https://api.mistral.ai/v1',
+      MISTRAL_MODEL: 'devstral-latest',
+      MISTRAL_API_KEY: 'mistral-stale-key',
+      CODEX_API_KEY: 'codex-stale-key',
+      CHATGPT_ACCOUNT_ID: 'acct-live',
+      CODEX_ACCOUNT_ID: 'acct-legacy',
       CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED: '1',
       CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID: 'profile_old',
     }
@@ -79,8 +86,15 @@ describe('onboarding auth precedence cleanup', () => {
     expect(env.OPENAI_API_BASE).toBeUndefined()
 
     expect(env.CLAUDE_CODE_USE_OPENAI).toBeUndefined()
+    expect(env.CLAUDE_CODE_USE_MISTRAL).toBeUndefined()
     expect(env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED).toBeUndefined()
     expect(env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID).toBeUndefined()
+    expect(env.MISTRAL_BASE_URL).toBeUndefined()
+    expect(env.MISTRAL_MODEL).toBeUndefined()
+    expect(env.MISTRAL_API_KEY).toBeUndefined()
+    expect(env.CODEX_API_KEY).toBeUndefined()
+    expect(env.CHATGPT_ACCOUNT_ID).toBeUndefined()
+    expect(env.CODEX_ACCOUNT_ID).toBeUndefined()
 
     const settingsEnv = buildGithubOnboardingSettingsEnv('github:copilot')
     expect(settingsEnv.CLAUDE_CODE_USE_GITHUB).toBe('1')
@@ -89,6 +103,13 @@ describe('onboarding auth precedence cleanup', () => {
     expect(settingsEnv.OPENAI_ORG).toBeUndefined()
     expect(settingsEnv.OPENAI_PROJECT).toBeUndefined()
     expect(settingsEnv.OPENAI_ORGANIZATION).toBeUndefined()
+    expect(settingsEnv.CLAUDE_CODE_USE_MISTRAL).toBeUndefined()
+    expect(settingsEnv.MISTRAL_BASE_URL).toBeUndefined()
+    expect(settingsEnv.MISTRAL_MODEL).toBeUndefined()
+    expect(settingsEnv.MISTRAL_API_KEY).toBeUndefined()
+    expect(settingsEnv.CODEX_API_KEY).toBeUndefined()
+    expect(settingsEnv.CHATGPT_ACCOUNT_ID).toBeUndefined()
+    expect(settingsEnv.CODEX_ACCOUNT_ID).toBeUndefined()
   })
 })
 

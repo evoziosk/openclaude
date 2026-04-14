@@ -294,6 +294,22 @@ test('buildCurrentProviderSummary recognizes GitHub Models mode', () => {
   expect(summary.endpointLabel).toBe('https://models.github.ai/inference')
 })
 
+test('buildCurrentProviderSummary flags invalid multi-active provider state', () => {
+  const summary = buildCurrentProviderSummary({
+    processEnv: {
+      CLAUDE_CODE_USE_GITHUB: '1',
+      CLAUDE_CODE_USE_GEMINI: '1',
+      OPENAI_MODEL: 'github:copilot',
+      OPENAI_BASE_URL: 'https://models.github.ai/inference',
+    },
+    persisted: null,
+  })
+
+  expect(summary.providerLabel).toBe(
+    'Invalid provider state (multiple active flags)',
+  )
+})
+
 test('getProviderWizardDefaults ignores poisoned current provider values', () => {
   const defaults = getProviderWizardDefaults({
     OPENAI_API_KEY: 'sk-secret-12345678',
@@ -307,4 +323,3 @@ test('getProviderWizardDefaults ignores poisoned current provider values', () =>
   expect(defaults.openAIBaseUrl).toBe('https://api.openai.com/v1')
   expect(defaults.geminiModel).toBe('gemini-2.0-flash')
 })
-

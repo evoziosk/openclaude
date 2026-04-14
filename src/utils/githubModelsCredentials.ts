@@ -512,6 +512,84 @@ export function clearGithubModelsToken(): {
   return secureStorage.update(next as typeof prev)
 }
 
+export function renameGithubAccount(
+  currentAccountName: string | undefined,
+  nextAccountName: string | undefined,
+): { success: boolean; warning?: string } {
+  if (isBareMode()) {
+    return { success: true }
+  }
+
+  const normalizedCurrent = currentAccountName?.trim()
+  if (!normalizedCurrent) {
+    return { success: false, warning: 'No GitHub account selected.' }
+  }
+
+  const normalizedNext = nextAccountName?.trim()
+  if (!normalizedNext) {
+    return { success: false, warning: 'New account name cannot be empty.' }
+  }
+
+  const secureStorage = getSecureStorage()
+  const prev = secureStorage.read() || {}
+  const prevBlob = (prev as Record<string, unknown>)[
+    GITHUB_MODELS_STORAGE_KEY
+  ] as GithubModelsCredentialBlob | undefined
+  const normalized = normalizeGithubCredentialBlob(prevBlob)
+
+  const sourceAccount = findGithubAccountByName(
+    normalized.accounts,
+    normalizedCurrent,
+  )
+
+  if (!sourceAccount) {
+    return {
+      success: false,
+      warning: `GitHub account '${normalizedCurrent}' was not found.`,
+    }
+  }
+
+  const conflictingAccount = findGithubAccountByName(
+    normalized.accounts,
+    normalizedNext,
+  )
+  if (
+    conflictingAccount &&
+    conflictingAccount.accountName.toLowerCase() !==
+      sourceAccount.accountName.toLowerCase()
+  ) {
+    return {
+      success: false,
+      warning: `GitHub account '${normalizedNext}' already exists.`,
+    }
+  }
+
+  const renamedAccounts = normalized.accounts.map(account =>
+    account.accountName.toLowerCase() === sourceAccount.accountName.toLowerCase()
+      ? {
+          ...account,
+          accountName: normalizedNext,
+        }
+      : account,
+  )
+
+  const activeAccountName =
+    normalized.activeAccountName?.toLowerCase() ===
+    sourceAccount.accountName.toLowerCase()
+      ? normalizedNext
+      : normalized.activeAccountName
+
+  const merged = {
+    ...(prev as Record<string, unknown>),
+    [GITHUB_MODELS_STORAGE_KEY]: buildGithubCredentialBlob(
+      renamedAccounts,
+      activeAccountName,
+    ),
+  }
+
+  return secureStorage.update(merged as typeof prev)
+}
+
 export function removeGithubAccount(
   accountName: string | undefined,
 ): { success: boolean; warning?: string } {

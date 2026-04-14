@@ -233,7 +233,8 @@ test('strips Anthropic-specific headers on GitHub Codex transport requests', asy
   let capturedHeaders: Headers | undefined
 
   process.env.CLAUDE_CODE_USE_GITHUB = '1'
-  process.env.OPENAI_API_KEY = 'github-test-key'
+  process.env.GITHUB_TOKEN = 'github-test-key'
+  delete process.env.OPENAI_API_KEY
   delete process.env.OPENAI_BASE_URL
   delete process.env.OPENAI_MODEL
 

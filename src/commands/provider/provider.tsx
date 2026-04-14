@@ -158,6 +158,22 @@ function isEnvTruthy(value: string | undefined): boolean {
   return normalized !== '' && normalized !== '0' && normalized !== 'false' && normalized !== 'no'
 }
 
+function hasMultipleProvidersActive(
+  processEnv: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const activeFlags = [
+    processEnv.CLAUDE_CODE_USE_GITHUB,
+    processEnv.CLAUDE_CODE_USE_GEMINI,
+    processEnv.CLAUDE_CODE_USE_MISTRAL,
+    processEnv.CLAUDE_CODE_USE_BEDROCK,
+    processEnv.CLAUDE_CODE_USE_VERTEX,
+    processEnv.CLAUDE_CODE_USE_FOUNDRY,
+    processEnv.CLAUDE_CODE_USE_OPENAI,
+  ].filter(value => isEnvTruthy(value))
+
+  return activeFlags.length > 1
+}
+
 function getSafeDisplayValue(
   value: string | undefined,
   processEnv: NodeJS.ProcessEnv,
@@ -204,6 +220,18 @@ export function buildCurrentProviderSummary(options?: {
   const processEnv = options?.processEnv ?? process.env
   const persisted = options?.persisted ?? loadProfileFile()
   const savedProfileLabel = persisted?.profile ?? 'none'
+
+  if (hasMultipleProvidersActive(processEnv)) {
+    return {
+      providerLabel: 'Invalid provider state (multiple active flags)',
+      modelLabel: getSafeDisplayValue(processEnv.OPENAI_MODEL, processEnv),
+      endpointLabel: getSafeDisplayValue(
+        processEnv.OPENAI_BASE_URL ?? processEnv.OPENAI_API_BASE,
+        processEnv,
+      ),
+      savedProfileLabel,
+    }
+  }
 
   if (isEnvTruthy(processEnv.CLAUDE_CODE_USE_GEMINI)) {
     return {
@@ -1603,7 +1631,6 @@ export const call: LocalJSXCommandCall = async (onDone, _context, args) => {
     />
   )
 }
-
 
 
 

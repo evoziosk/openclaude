@@ -48,6 +48,7 @@ import {
   OverageCreditUpsell,
 } from '../LogoV2/OverageCreditUpsell.js'
 import { CodexUsage } from './CodexUsage.js'
+import { buildRemainingUsageDisplay } from './usageFormatting.js'
 
 type LimitBarProps = {
   title: string
@@ -69,7 +70,7 @@ function LimitBar({
     return null
   }
 
-  const usedText = `${Math.floor(utilization)}% used`
+  const usageDisplay = buildRemainingUsageDisplay(utilization)
   let subtext = resetsAt
     ? `Resets ${formatResetText(resetsAt, true, showTimeInReset)}`
     : undefined
@@ -84,12 +85,12 @@ function LimitBar({
         <Text bold>{title}</Text>
         <Box flexDirection="row" gap={1}>
           <ProgressBar
-            ratio={utilization / 100}
+            ratio={usageDisplay.ratio}
             width={50}
             fillColor="rate_limit_fill"
             emptyColor="rate_limit_empty"
           />
-          <Text>{usedText}</Text>
+          <Text>{usageDisplay.text}</Text>
         </Box>
         {subtext ? <Text dimColor>{subtext}</Text> : null}
       </Box>
@@ -108,12 +109,12 @@ function LimitBar({
         ) : null}
       </Text>
       <ProgressBar
-        ratio={utilization / 100}
+        ratio={usageDisplay.ratio}
         width={maxWidth}
         fillColor="rate_limit_fill"
         emptyColor="rate_limit_empty"
       />
-      <Text>{usedText}</Text>
+      <Text>{usageDisplay.text}</Text>
     </Box>
   )
 }
@@ -440,8 +441,7 @@ function GithubUsageBar({
     )
   }
 
-  const normalized = Math.max(0, Math.min(100, usedPercent))
-  const usedText = `${Math.floor(normalized)}% used`
+  const usageDisplay = buildRemainingUsageDisplay(usedPercent)
   const limitReached = window.limitReached
   const remainingText =
     window.remaining !== undefined
@@ -460,12 +460,12 @@ function GithubUsageBar({
         <Text bold>{title}</Text>
         <Box flexDirection="row" gap={1}>
           <ProgressBar
-            ratio={normalized / 100}
+            ratio={usageDisplay.ratio}
             width={50}
             fillColor="rate_limit_fill"
             emptyColor="rate_limit_empty"
           />
-          <Text color={limitReached ? 'red' : undefined}>{usedText}</Text>
+          <Text color={limitReached ? 'red' : undefined}>{usageDisplay.text}</Text>
         </Box>
         {subtext ? <Text dimColor>{subtext}</Text> : null}
         {limitReached ? <Text color="red">Limit reached!</Text> : null}
@@ -485,12 +485,12 @@ function GithubUsageBar({
         ) : null}
       </Text>
       <ProgressBar
-        ratio={normalized / 100}
+        ratio={usageDisplay.ratio}
         width={maxWidth}
         fillColor="rate_limit_fill"
         emptyColor="rate_limit_empty"
       />
-      <Text color={limitReached ? 'red' : undefined}>{usedText}</Text>
+      <Text color={limitReached ? 'red' : undefined}>{usageDisplay.text}</Text>
       {limitReached ? <Text color="red">Limit reached!</Text> : null}
     </Box>
   )
@@ -859,8 +859,6 @@ export function Usage(): React.ReactNode {
     </Tabs>
   )
 }
-
-
 
 
 

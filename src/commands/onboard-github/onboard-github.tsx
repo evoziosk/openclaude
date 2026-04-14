@@ -13,8 +13,12 @@ import {
 } from '../../services/github/deviceFlow.js'
 import type { LocalJSXCommandCall } from '../../types/command.js'
 import {
+  getActiveGithubModelsAccountName,
+  getGithubModelAccountName,
   hydrateGithubModelsTokenFromSecureStorage,
   listGithubModelsAccounts,
+  renameGithubAccount,
+  removeGithubAccount,
   readGithubModelsToken,
   saveGithubModelsToken,
   withGithubModelAccount,
@@ -34,11 +38,17 @@ const FORCE_RELOGIN_ARGS = new Set([
   '--reauth',
 ])
 
-type Step = 'menu' | 'enter-account-name' | 'device-busy' | 'error'
+type Step =
+  | 'menu'
+  | 'enter-account-name'
+  | 'rename-account-name'
+  | 'device-busy'
+  | 'error'
 
 const PROVIDER_SPECIFIC_KEYS = new Set([
   'CLAUDE_CODE_USE_OPENAI',
   'CLAUDE_CODE_USE_GEMINI',
+  'CLAUDE_CODE_USE_MISTRAL',
   'CLAUDE_CODE_USE_BEDROCK',
   'CLAUDE_CODE_USE_VERTEX',
   'CLAUDE_CODE_USE_FOUNDRY',
@@ -46,6 +56,12 @@ const PROVIDER_SPECIFIC_KEYS = new Set([
   'OPENAI_API_BASE',
   'OPENAI_API_KEY',
   'OPENAI_MODEL',
+  'MISTRAL_BASE_URL',
+  'MISTRAL_MODEL',
+  'MISTRAL_API_KEY',
+  'CODEX_API_KEY',
+  'CHATGPT_ACCOUNT_ID',
+  'CODEX_ACCOUNT_ID',
   'GEMINI_API_KEY',
   'GOOGLE_API_KEY',
   'GEMINI_BASE_URL',
@@ -100,9 +116,16 @@ export function buildGithubOnboardingSettingsEnv(
     OPENAI_API_BASE: undefined,
     CLAUDE_CODE_USE_OPENAI: undefined,
     CLAUDE_CODE_USE_GEMINI: undefined,
+    CLAUDE_CODE_USE_MISTRAL: undefined,
     CLAUDE_CODE_USE_BEDROCK: undefined,
     CLAUDE_CODE_USE_VERTEX: undefined,
     CLAUDE_CODE_USE_FOUNDRY: undefined,
+    MISTRAL_BASE_URL: undefined,
+    MISTRAL_MODEL: undefined,
+    MISTRAL_API_KEY: undefined,
+    CODEX_API_KEY: undefined,
+    CHATGPT_ACCOUNT_ID: undefined,
+    CODEX_ACCOUNT_ID: undefined,
   }
 }
 
@@ -122,9 +145,16 @@ export function applyGithubOnboardingProcessEnv(
 
   delete env.CLAUDE_CODE_USE_OPENAI
   delete env.CLAUDE_CODE_USE_GEMINI
+  delete env.CLAUDE_CODE_USE_MISTRAL
   delete env.CLAUDE_CODE_USE_BEDROCK
   delete env.CLAUDE_CODE_USE_VERTEX
   delete env.CLAUDE_CODE_USE_FOUNDRY
+  delete env.MISTRAL_BASE_URL
+  delete env.MISTRAL_MODEL
+  delete env.MISTRAL_API_KEY
+  delete env.CODEX_API_KEY
+  delete env.CHATGPT_ACCOUNT_ID
+  delete env.CODEX_ACCOUNT_ID
   delete env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED
   delete env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID
 }
@@ -201,6 +231,9 @@ function OnboardGithub(props: {
   const [accountNameInput, setAccountNameInput] = useState('')
   const [cursorOffset, setCursorOffset] = useState(0)
   const [pendingAccountName, setPendingAccountName] = useState<string | undefined>()
+  const [renameSourceAccountName, setRenameSourceAccountName] = useState<
+    string | undefined
+  >()
 
   const finalize = useCallback(
     async (
@@ -348,6 +381,62 @@ function OnboardGithub(props: {
     [runDeviceFlow],
   )
 
+  const startRenameAccount = useCallback(() => {
+    const sourceAccountName = getActiveGithubModelsAccountName()
+    if (!sourceAccountName) {
+      setErrorMsg('No active GitHub account is selected to rename.')
+      setStep('error')
+      return
+    }
+
+    setRenameSourceAccountName(sourceAccountName)
+    setAccountNameInput(sourceAccountName)
+    setCursorOffset(sourceAccountName.length)
+    setStep('rename-account-name')
+  }, [])
+
+  const submitRenameAccountName = useCallback(
+    (value: string) => {
+      const source = renameSourceAccountName?.trim()
+      if (!source) {
+        setErrorMsg('No GitHub account is selected to rename.')
+        setStep('error')
+        return
+      }
+
+      const nextAccountName = value.trim()
+      const renamed = renameGithubAccount(source, nextAccountName)
+      if (!renamed.success) {
+        setErrorMsg(renamed.warning ?? 'Failed to rename GitHub account.')
+        setStep('error')
+        return
+      }
+
+      const currentModel = getCurrentGithubModelSetting()
+      const taggedAccount = getGithubModelAccountName(currentModel)
+      const nextModel =
+        taggedAccount && taggedAccount.toLowerCase() === source.toLowerCase()
+          ? withGithubModelAccount(currentModel, nextAccountName)
+          : currentModel
+
+      const activated = activateGithubOnboardingMode(nextModel, {
+        onChangeAPIKey,
+      })
+      if (!activated.ok) {
+        setErrorMsg(
+          `Account renamed, but updating active settings failed: ${activated.detail ?? 'unknown error'}.`,
+        )
+        setStep('error')
+        return
+      }
+
+      onDone(`GitHub account '${source}' renamed to '${nextAccountName}'.`, {
+        display: 'user',
+      })
+    },
+    [onChangeAPIKey, onDone, renameSourceAccountName],
+  )
+
   if (step === 'error' && errorMsg) {
     const options = [
       {
@@ -440,6 +529,68 @@ function OnboardGithub(props: {
     )
   }
 
+  if (step === 'rename-account-name') {
+    const source = renameSourceAccountName
+
+    return (
+      <Box flexDirection="column" gap={1}>
+        <Text bold>Rename GitHub account tag</Text>
+        {source ? (
+          <Text dimColor>Current account: {source}</Text>
+        ) : (
+          <Text dimColor>No active account selected.</Text>
+        )}
+        <Text dimColor>
+          Update the saved account label used in model tags (for example: work,
+          personal).
+        </Text>
+        <Box flexDirection="row" gap={1}>
+          <Text>-</Text>
+          <TextInput
+            value={accountNameInput}
+            onChange={setAccountNameInput}
+            onSubmit={submitRenameAccountName}
+            focus={true}
+            showCursor={true}
+            placeholder="New account name"
+            columns={Math.max(30, columns - 8)}
+            cursorOffset={cursorOffset}
+            onChangeCursorOffset={setCursorOffset}
+          />
+        </Box>
+        <Select
+          options={[
+            {
+              label: 'Save',
+              value: 'save' as const,
+            },
+            {
+              label: 'Back',
+              value: 'back' as const,
+            },
+            {
+              label: 'Cancel',
+              value: 'cancel' as const,
+            },
+          ]}
+          onChange={(v: string) => {
+            if (v === 'save') {
+              submitRenameAccountName(accountNameInput)
+              return
+            }
+            if (v === 'back') {
+              setStep('menu')
+              setErrorMsg(null)
+              setRenameSourceAccountName(undefined)
+              return
+            }
+            onDone('GitHub onboard cancelled', { display: 'system' })
+          }}
+        />
+      </Box>
+    )
+  }
+
   if (step === 'device-busy') {
     return (
       <Box flexDirection="column" gap={1}>
@@ -476,6 +627,10 @@ function OnboardGithub(props: {
         value: 'remove-account' as const
       },
       {
+        label: 'Rename account tag',
+        value: 'rename-account' as const,
+      },
+      {
         label: 'Connect another account',
         value: 'connect-another' as const,
       },
@@ -503,15 +658,20 @@ function OnboardGithub(props: {
               activateExistingLogin()
               return
             }
-            if (v === 'remove-account') 
-              {
-                const removed = removeGithubAccount(getActiveGithubModelsAccountName())
-                if (!removed.success) {
-                setErrorMsg(removed.warning ?? 'Failed to remove the account.') 
+            if (v === 'remove-account') {
+              const removed = removeGithubAccount(
+                getActiveGithubModelsAccountName(),
+              )
+              if (!removed.success) {
+                setErrorMsg(removed.warning ?? 'Failed to remove the account.')
                 setStep('error')
                 return
               }
               onDone('Account removed successfully.', { display: 'user' })
+              return
+            }
+            if (v === 'rename-account') {
+              startRenameAccount()
               return
             }
             void runDeviceFlow(undefined, true)

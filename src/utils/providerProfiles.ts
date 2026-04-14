@@ -369,6 +369,9 @@ export function clearProviderProfileEnvFromProcessEnv(
   delete processEnv.OPENAI_API_BASE
   delete processEnv.OPENAI_MODEL
   delete processEnv.OPENAI_API_KEY
+  delete processEnv.CODEX_API_KEY
+  delete processEnv.CHATGPT_ACCOUNT_ID
+  delete processEnv.CODEX_ACCOUNT_ID
 
   delete processEnv.ANTHROPIC_BASE_URL
   delete processEnv.ANTHROPIC_MODEL
@@ -396,6 +399,9 @@ export function applyProviderProfileToProcessEnv(profile: ProviderProfile): void
     delete process.env.OPENAI_API_BASE
     delete process.env.OPENAI_MODEL
     delete process.env.OPENAI_API_KEY
+    delete process.env.CODEX_API_KEY
+    delete process.env.CHATGPT_ACCOUNT_ID
+    delete process.env.CODEX_ACCOUNT_ID
     return
   }
 
@@ -408,6 +414,10 @@ export function applyProviderProfileToProcessEnv(profile: ProviderProfile): void
   } else {
     delete process.env.OPENAI_API_KEY
   }
+
+  delete process.env.CODEX_API_KEY
+  delete process.env.CHATGPT_ACCOUNT_ID
+  delete process.env.CODEX_ACCOUNT_ID
 }
 
 export function applyActiveProviderProfileFromConfig(
@@ -761,4 +771,3 @@ export function clearActiveOpenAIModelOptionsCache(): void {
     }
   })
 }
-

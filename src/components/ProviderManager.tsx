@@ -21,7 +21,7 @@ import {
   recommendOllamaModel,
 } from '../utils/providerRecommendation.js'
 import {
-  removeGithubAccount,
+  clearGithubModelsToken,
   GITHUB_MODELS_HYDRATED_ENV_MARKER,
   hydrateGithubModelsTokenFromSecureStorage,
   readGithubModelsToken,
@@ -294,6 +294,7 @@ export function ProviderManager({
       env: {
         CLAUDE_CODE_USE_OPENAI: undefined as any,
         CLAUDE_CODE_USE_GEMINI: undefined as any,
+        CLAUDE_CODE_USE_MISTRAL: undefined as any,
         CLAUDE_CODE_USE_GITHUB: undefined as any,
         CLAUDE_CODE_USE_BEDROCK: undefined as any,
         CLAUDE_CODE_USE_VERTEX: undefined as any,
@@ -320,9 +321,16 @@ export function ProviderManager({
         OPENAI_API_BASE: undefined as any,
         CLAUDE_CODE_USE_OPENAI: undefined as any,
         CLAUDE_CODE_USE_GEMINI: undefined as any,
+        CLAUDE_CODE_USE_MISTRAL: undefined as any,
         CLAUDE_CODE_USE_BEDROCK: undefined as any,
         CLAUDE_CODE_USE_VERTEX: undefined as any,
         CLAUDE_CODE_USE_FOUNDRY: undefined as any,
+        MISTRAL_BASE_URL: undefined as any,
+        MISTRAL_MODEL: undefined as any,
+        MISTRAL_API_KEY: undefined as any,
+        CODEX_API_KEY: undefined as any,
+        CHATGPT_ACCOUNT_ID: undefined as any,
+        CODEX_ACCOUNT_ID: undefined as any,
       },
     })
     if (error) {
@@ -339,9 +347,16 @@ export function ProviderManager({
     delete process.env.OPENAI_API_BASE
     delete process.env.CLAUDE_CODE_USE_OPENAI
     delete process.env.CLAUDE_CODE_USE_GEMINI
+    delete process.env.CLAUDE_CODE_USE_MISTRAL
     delete process.env.CLAUDE_CODE_USE_BEDROCK
     delete process.env.CLAUDE_CODE_USE_VERTEX
     delete process.env.CLAUDE_CODE_USE_FOUNDRY
+    delete process.env.MISTRAL_BASE_URL
+    delete process.env.MISTRAL_MODEL
+    delete process.env.MISTRAL_API_KEY
+    delete process.env.CODEX_API_KEY
+    delete process.env.CHATGPT_ACCOUNT_ID
+    delete process.env.CODEX_ACCOUNT_ID
     delete process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED
     delete process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID
     delete process.env[GITHUB_MODELS_HYDRATED_ENV_MARKER]
@@ -935,7 +950,11 @@ export function ProviderManager({
             <>
               {profiles.map(profile => (
                 <Text key={profile.id} dimColor>
-                  - {profile.name}: {profileSummary(profile, profile.id === activeProfileId)}
+                  - {profile.name}:{' '}
+                  {profileSummary(
+                    profile,
+                    profile.id === activeProfileId && !isGithubActive,
+                  )}
                 </Text>
               ))}
               {githubProviderAvailable ? (
@@ -995,7 +1014,7 @@ export function ProviderManager({
     const selectOptions = profiles.map(profile => ({
       value: profile.id,
       label:
-        profile.id === activeProfileId
+        profile.id === activeProfileId && !isGithubActive
           ? `${profile.name} (active)`
           : profile.name,
       description: `${profile.provider === 'anthropic' ? 'anthropic' : 'openai-compatible'} · ${profile.baseUrl} · ${profile.model}`,
@@ -1151,9 +1170,6 @@ export function ProviderManager({
 
   return <Pane color="permission">{content}</Pane>
 }
-
-
-
 
 
 

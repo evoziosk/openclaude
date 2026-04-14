@@ -203,4 +203,86 @@ describe('multi-account credential resolution', () => {
     expect(readGithubModelsToken()).toBe('token-default')
     expect(readGithubModelsToken('work')).toBe('token-work')
   })
+
+  test('renameGithubAccount renames selected account and preserves active selection', async () => {
+    let store: Record<string, unknown> = {
+      githubModels: {
+        accounts: [
+          {
+            accountName: 'default',
+            accessToken: 'token-default',
+            oauthAccessToken: 'oauth-default',
+          },
+          {
+            accountName: 'work',
+            accessToken: 'token-work',
+            oauthAccessToken: 'oauth-work',
+          },
+        ],
+        activeAccountName: 'work',
+      },
+    }
+
+    mock.module('./secureStorage/index.js', () => ({
+      getSecureStorage: () => ({
+        read: () => store,
+        readAsync: async () => store,
+        update: (next: Record<string, unknown>) => {
+          store = next
+          return { success: true }
+        },
+      }),
+    }))
+
+    const {
+      renameGithubAccount,
+      listGithubModelsAccounts,
+      getActiveGithubModelsAccountName,
+      readGithubModelsToken,
+    } = await import('./githubModelsCredentials.js?rename-account')
+
+    expect(renameGithubAccount('work', 'client').success).toBe(true)
+    expect(
+      listGithubModelsAccounts().map(account => account.accountName).sort(),
+    ).toEqual(['client', 'default'])
+    expect(getActiveGithubModelsAccountName()).toBe('client')
+    expect(readGithubModelsToken()).toBe('token-work')
+    expect(readGithubModelsToken('client')).toBe('token-work')
+  })
+
+  test('renameGithubAccount rejects duplicate target names', async () => {
+    let store: Record<string, unknown> = {
+      githubModels: {
+        accounts: [
+          {
+            accountName: 'default',
+            accessToken: 'token-default',
+            oauthAccessToken: 'oauth-default',
+          },
+          {
+            accountName: 'work',
+            accessToken: 'token-work',
+            oauthAccessToken: 'oauth-work',
+          },
+        ],
+        activeAccountName: 'default',
+      },
+    }
+
+    mock.module('./secureStorage/index.js', () => ({
+      getSecureStorage: () => ({
+        read: () => store,
+        readAsync: async () => store,
+        update: (_next: Record<string, unknown>) => ({ success: true }),
+      }),
+    }))
+
+    const { renameGithubAccount } = await import(
+      './githubModelsCredentials.js?rename-duplicate'
+    )
+
+    const result = renameGithubAccount('work', 'default')
+    expect(result.success).toBe(false)
+    expect(result.warning).toContain('already exists')
+  })
 })

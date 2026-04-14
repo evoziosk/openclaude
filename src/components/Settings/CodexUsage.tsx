@@ -16,6 +16,7 @@ import { logError } from '../../utils/log.js'
 import { ConfigurableShortcutHint } from '../ConfigurableShortcutHint.js'
 import { Byline } from '../design-system/Byline.js'
 import { ProgressBar } from '../design-system/ProgressBar.js'
+import { buildRemainingUsageDisplay } from './usageFormatting.js'
 
 type CodexUsageLimitBarProps = {
   label: string
@@ -30,8 +31,7 @@ function CodexUsageLimitBar({
   resetsAt,
   maxWidth,
 }: CodexUsageLimitBarProps): React.ReactNode {
-  const normalizedUsedPercent = Math.max(0, Math.min(100, usedPercent))
-  const usedText = `${Math.floor(normalizedUsedPercent)}% used`
+  const usageDisplay = buildRemainingUsageDisplay(usedPercent)
   const resetText = resetsAt
     ? `Resets ${formatResetText(resetsAt, true, true)}`
     : undefined
@@ -42,12 +42,12 @@ function CodexUsageLimitBar({
         <Text bold>{label}</Text>
         <Box flexDirection="row" gap={1}>
           <ProgressBar
-            ratio={normalizedUsedPercent / 100}
+            ratio={usageDisplay.ratio}
             width={50}
             fillColor="rate_limit_fill"
             emptyColor="rate_limit_empty"
           />
-          <Text>{usedText}</Text>
+          <Text>{usageDisplay.text}</Text>
         </Box>
         {resetText ? <Text dimColor>{resetText}</Text> : null}
       </Box>
@@ -66,12 +66,12 @@ function CodexUsageLimitBar({
         ) : null}
       </Text>
       <ProgressBar
-        ratio={normalizedUsedPercent / 100}
+        ratio={usageDisplay.ratio}
         width={maxWidth}
         fillColor="rate_limit_fill"
         emptyColor="rate_limit_empty"
       />
-      <Text>{usedText}</Text>
+      <Text>{usageDisplay.text}</Text>
     </Box>
   )
 }

@@ -21,6 +21,9 @@ const RESTORED_KEYS = [
   'OPENAI_API_BASE',
   'OPENAI_MODEL',
   'OPENAI_API_KEY',
+  'CODEX_API_KEY',
+  'CHATGPT_ACCOUNT_ID',
+  'CODEX_ACCOUNT_ID',
   'ANTHROPIC_BASE_URL',
   'ANTHROPIC_MODEL',
   'ANTHROPIC_API_KEY',
@@ -138,6 +141,48 @@ describe('applyProviderProfileToProcessEnv', () => {
     expect(process.env.CLAUDE_CODE_USE_GITHUB).toBeUndefined()
     expect(process.env.CLAUDE_CODE_USE_OPENAI).toBeUndefined()
     expect(getFreshAPIProvider()).toBe('firstParty')
+  })
+
+  test('openai profile clears stale codex auth markers', async () => {
+    const { applyProviderProfileToProcessEnv } =
+      await importFreshProviderProfileModules()
+
+    process.env.CODEX_API_KEY = 'codex-live'
+    process.env.CHATGPT_ACCOUNT_ID = 'acct_live'
+    process.env.CODEX_ACCOUNT_ID = 'acct_legacy'
+
+    applyProviderProfileToProcessEnv(
+      buildProfile({
+        id: 'saved_openai',
+        baseUrl: 'https://api.openai.com/v1',
+        model: 'gpt-4o',
+      }),
+    )
+
+    expect(process.env.CODEX_API_KEY).toBeUndefined()
+    expect(process.env.CHATGPT_ACCOUNT_ID).toBeUndefined()
+    expect(process.env.CODEX_ACCOUNT_ID).toBeUndefined()
+  })
+
+  test('anthropic profile clears stale codex auth markers', async () => {
+    const { applyProviderProfileToProcessEnv } =
+      await importFreshProviderProfileModules()
+
+    process.env.CODEX_API_KEY = 'codex-live'
+    process.env.CHATGPT_ACCOUNT_ID = 'acct_live'
+    process.env.CODEX_ACCOUNT_ID = 'acct_legacy'
+
+    applyProviderProfileToProcessEnv(
+      buildProfile({
+        provider: 'anthropic',
+        baseUrl: 'https://api.anthropic.com',
+        model: 'claude-sonnet-4-6',
+      }),
+    )
+
+    expect(process.env.CODEX_API_KEY).toBeUndefined()
+    expect(process.env.CHATGPT_ACCOUNT_ID).toBeUndefined()
+    expect(process.env.CODEX_ACCOUNT_ID).toBeUndefined()
   })
 })
 
@@ -439,4 +484,3 @@ describe('deleteProviderProfile', () => {
     expect(process.env.OPENAI_MODEL).toBe('qwen2.5:3b')
   })
 })
-
