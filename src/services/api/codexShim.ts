@@ -9,6 +9,10 @@ import {
   shouldBufferPotentialReasoningPrefix,
   stripLeakedReasoningPreamble,
 } from './reasoningLeakSanitizer.js'
+import {
+  hasToolFieldMapping,
+  normalizeToolArguments,
+} from './toolArgumentNormalization.js'
 
 export interface AnthropicUsage {
   input_tokens: number
@@ -685,7 +689,13 @@ export async function* codexStreamToAnthropic(
   const messageId = makeMessageId()
   const toolBlocksByItemId = new Map<
     string,
-    { index: number; toolUseId: string }
+    {
+      index: number
+      toolUseId: string
+      toolName: string
+      jsonBuffer: string
+      normalizeAtStop: boolean
+    }
   >()
   let activeTextBlockIndex: number | null = null
   let activeTextBuffer = ''
@@ -751,9 +761,16 @@ export async function* codexStreamToAnthropic(
         yield* closeActiveTextBlock()
         const blockIndex = nextContentBlockIndex++
         const toolUseId = item.call_id ?? item.id ?? `call_${blockIndex}`
+        const toolName = item.name ?? 'tool'
+        const initialArguments =
+          typeof item.arguments === 'string' ? item.arguments : ''
+        const normalizeAtStop = hasToolFieldMapping(toolName)
         toolBlocksByItemId.set(String(item.id ?? toolUseId), {
           index: blockIndex,
           toolUseId,
+          toolName,
+          jsonBuffer: initialArguments,
+          normalizeAtStop,
         })
         sawToolUse = true
 
@@ -763,18 +780,18 @@ export async function* codexStreamToAnthropic(
           content_block: {
             type: 'tool_use',
             id: toolUseId,
-            name: item.name ?? 'tool',
+            name: toolName,
             input: {},
           },
         }
 
-        if (item.arguments) {
+        if (initialArguments && !normalizeAtStop) {
           yield {
             type: 'content_block_delta',
             index: blockIndex,
             delta: {
               type: 'input_json_delta',
-              partial_json: item.arguments,
+              partial_json: initialArguments,
             },
           }
         }
@@ -836,12 +853,21 @@ export async function* codexStreamToAnthropic(
     if (event.event === 'response.function_call_arguments.delta') {
       const toolBlock = toolBlocksByItemId.get(String(payload.item_id ?? ''))
       if (toolBlock) {
+        const deltaText = typeof payload.delta === 'string' ? payload.delta : ''
+        if (deltaText) {
+          toolBlock.jsonBuffer += deltaText
+        }
+
+        if (toolBlock.normalizeAtStop) {
+          continue
+        }
+
         yield {
           type: 'content_block_delta',
           index: toolBlock.index,
           delta: {
             type: 'input_json_delta',
-            partial_json: payload.delta ?? '',
+            partial_json: deltaText,
           },
         }
       }
@@ -853,6 +879,20 @@ export async function* codexStreamToAnthropic(
       if (item?.type === 'function_call') {
         const toolBlock = toolBlocksByItemId.get(String(item.id ?? ''))
         if (toolBlock) {
+          if (toolBlock.normalizeAtStop) {
+            const normalizedInput = normalizeToolArguments(
+              toolBlock.toolName,
+              toolBlock.jsonBuffer,
+            )
+            yield {
+              type: 'content_block_delta',
+              index: toolBlock.index,
+              delta: {
+                type: 'input_json_delta',
+                partial_json: JSON.stringify(normalizedInput),
+              },
+            }
+          }
           yield {
             type: 'content_block_stop',
             index: toolBlock.index,
@@ -882,6 +922,20 @@ export async function* codexStreamToAnthropic(
 
   yield* closeActiveTextBlock()
   for (const toolBlock of toolBlocksByItemId.values()) {
+    if (toolBlock.normalizeAtStop) {
+      const normalizedInput = normalizeToolArguments(
+        toolBlock.toolName,
+        toolBlock.jsonBuffer,
+      )
+      yield {
+        type: 'content_block_delta',
+        index: toolBlock.index,
+        delta: {
+          type: 'input_json_delta',
+          partial_json: JSON.stringify(normalizedInput),
+        },
+      }
+    }
     yield {
       type: 'content_block_stop',
       index: toolBlock.index,
@@ -931,12 +985,10 @@ export function convertCodexResponseToAnthropicMessage(
     }
 
     if (item?.type === 'function_call') {
-      let input: unknown
-      try {
-        input = JSON.parse(item.arguments ?? '{}')
-      } catch {
-        input = { raw: item.arguments ?? '' }
-      }
+      const input = normalizeToolArguments(
+        item.name ?? 'tool',
+        typeof item.arguments === 'string' ? item.arguments : undefined,
+      )
 
       content.push({
         type: 'tool_use',

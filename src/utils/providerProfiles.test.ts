@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test'
 
 import type { ProviderProfile } from './config.js'
+import * as realConfigModule from './config.js'
 
 async function importFreshProvidersModule() {
   return import(`./model/providers.ts?ts=${Date.now()}-${Math.random()}`)
@@ -73,6 +74,7 @@ afterEach(() => {
 async function importFreshProviderProfileModules() {
   mock.restore()
   mock.module('./config.js', () => ({
+    ...realConfigModule,
     getGlobalConfig: () => mockConfigState,
     saveGlobalConfig: (
       updater: (current: MockConfigState) => MockConfigState,
@@ -323,6 +325,228 @@ describe('applyActiveProviderProfileFromConfig', () => {
     expect(String(process.env.CLAUDE_CODE_USE_OPENAI)).toBe('1')
     expect(process.env.OPENAI_BASE_URL).toBe('https://api.openai.com/v1')
     expect(process.env.OPENAI_MODEL).toBe('gpt-4o')
+  })
+})
+
+describe('switchActiveProviderProfileForModel', () => {
+  test('switches from OpenAI profile to Anthropic profile for Claude aliases', async () => {
+    const {
+      applyProviderProfileToProcessEnv,
+      getActiveProviderProfile,
+      switchActiveProviderProfileForModel,
+    } = await importFreshProviderProfileModules()
+
+    const openaiProfile = buildProfile({
+      id: 'openai_profile',
+      provider: 'openai',
+      baseUrl: 'https://api.openai.com/v1',
+      model: 'gpt-4o',
+    })
+    const anthropicProfile = buildProfile({
+      id: 'anthropic_profile',
+      provider: 'anthropic',
+      baseUrl: 'https://api.anthropic.com',
+      model: 'claude-sonnet-4-6',
+    })
+
+    saveMockGlobalConfig(current => ({
+      ...current,
+      providerProfiles: [openaiProfile, anthropicProfile],
+      activeProviderProfileId: openaiProfile.id,
+    }))
+    applyProviderProfileToProcessEnv(openaiProfile)
+
+    const switched = switchActiveProviderProfileForModel('sonnet')
+
+    expect(switched?.id).toBe(anthropicProfile.id)
+    expect(getActiveProviderProfile()?.id).toBe(anthropicProfile.id)
+    expect(process.env.CLAUDE_CODE_USE_OPENAI).toBeUndefined()
+    expect(process.env.ANTHROPIC_BASE_URL).toBe('https://api.anthropic.com')
+    expect(process.env.ANTHROPIC_MODEL).toBe('claude-sonnet-4-6')
+  })
+
+  test('switches to codex profile for codex models', async () => {
+    const {
+      applyProviderProfileToProcessEnv,
+      getActiveProviderProfile,
+      switchActiveProviderProfileForModel,
+    } = await importFreshProviderProfileModules()
+
+    const openaiProfile = buildProfile({
+      id: 'openai_profile',
+      provider: 'openai',
+      baseUrl: 'https://api.openai.com/v1',
+      model: 'gpt-4o',
+    })
+    const codexProfile = buildProfile({
+      id: 'codex_profile',
+      provider: 'openai',
+      baseUrl: 'https://chatgpt.com/backend-api/codex',
+      model: 'codexplan',
+    })
+
+    saveMockGlobalConfig(current => ({
+      ...current,
+      providerProfiles: [openaiProfile, codexProfile],
+      activeProviderProfileId: openaiProfile.id,
+    }))
+    applyProviderProfileToProcessEnv(openaiProfile)
+
+    const switched = switchActiveProviderProfileForModel('codexplan')
+
+    expect(switched?.id).toBe(codexProfile.id)
+    expect(getActiveProviderProfile()?.id).toBe(codexProfile.id)
+    expect(process.env.CLAUDE_CODE_USE_OPENAI).toBe('1')
+    expect(process.env.OPENAI_BASE_URL).toBe(
+      'https://chatgpt.com/backend-api/codex',
+    )
+    expect(process.env.OPENAI_MODEL).toBe('codexplan')
+  })
+
+  test('switches to codex profile for direct Codex model IDs', async () => {
+    const {
+      applyProviderProfileToProcessEnv,
+      getActiveProviderProfile,
+      switchActiveProviderProfileForModel,
+    } = await importFreshProviderProfileModules()
+
+    const openaiProfile = buildProfile({
+      id: 'openai_profile',
+      provider: 'openai',
+      baseUrl: 'https://api.openai.com/v1',
+      model: 'gpt-4o',
+    })
+    const codexProfile = buildProfile({
+      id: 'codex_profile',
+      provider: 'openai',
+      baseUrl: 'https://chatgpt.com/backend-api/codex',
+      model: 'codexplan',
+    })
+
+    saveMockGlobalConfig(current => ({
+      ...current,
+      providerProfiles: [openaiProfile, codexProfile],
+      activeProviderProfileId: openaiProfile.id,
+    }))
+    applyProviderProfileToProcessEnv(openaiProfile)
+
+    const switched = switchActiveProviderProfileForModel('gpt-5.4')
+
+    expect(switched?.id).toBe(codexProfile.id)
+    expect(getActiveProviderProfile()?.id).toBe(codexProfile.id)
+    expect(process.env.OPENAI_BASE_URL).toBe(
+      'https://chatgpt.com/backend-api/codex',
+    )
+    expect(process.env.OPENAI_MODEL).toBe('codexplan')
+  })
+
+  test('switches away from codex profile to non-codex OpenAI profile for generic OpenAI models', async () => {
+    const {
+      applyProviderProfileToProcessEnv,
+      getActiveProviderProfile,
+      switchActiveProviderProfileForModel,
+    } = await importFreshProviderProfileModules()
+
+    const openaiProfile = buildProfile({
+      id: 'openai_profile',
+      provider: 'openai',
+      baseUrl: 'https://api.openai.com/v1',
+      model: 'gpt-4o',
+    })
+    const codexProfile = buildProfile({
+      id: 'codex_profile',
+      provider: 'openai',
+      baseUrl: 'https://chatgpt.com/backend-api/codex',
+      model: 'codexplan',
+    })
+
+    saveMockGlobalConfig(current => ({
+      ...current,
+      providerProfiles: [openaiProfile, codexProfile],
+      activeProviderProfileId: codexProfile.id,
+    }))
+    applyProviderProfileToProcessEnv(codexProfile)
+
+    const switched = switchActiveProviderProfileForModel('gpt-4o-mini')
+
+    expect(switched?.id).toBe(openaiProfile.id)
+    expect(getActiveProviderProfile()?.id).toBe(openaiProfile.id)
+    expect(process.env.CLAUDE_CODE_USE_OPENAI).toBe('1')
+    expect(process.env.OPENAI_BASE_URL).toBe('https://api.openai.com/v1')
+  })
+
+  test('prefers exact model match among openai-compatible profiles', async () => {
+    const {
+      applyProviderProfileToProcessEnv,
+      getActiveProviderProfile,
+      switchActiveProviderProfileForModel,
+    } = await importFreshProviderProfileModules()
+
+    const currentProfile = buildProfile({
+      id: 'current_openai',
+      provider: 'openai',
+      baseUrl: 'https://api.openai.com/v1',
+      model: 'gpt-4o',
+    })
+    const targetProfile = buildProfile({
+      id: 'target_openai',
+      provider: 'openai',
+      baseUrl: 'https://api.openai.com/v1',
+      model: 'gpt-4o-mini',
+    })
+
+    saveMockGlobalConfig(current => ({
+      ...current,
+      providerProfiles: [currentProfile, targetProfile],
+      activeProviderProfileId: currentProfile.id,
+    }))
+    applyProviderProfileToProcessEnv(currentProfile)
+
+    const switched = switchActiveProviderProfileForModel('gpt-4o-mini')
+
+    expect(switched?.id).toBe(targetProfile.id)
+    expect(getActiveProviderProfile()?.id).toBe(targetProfile.id)
+    expect(process.env.OPENAI_MODEL).toBe('gpt-4o-mini')
+  })
+
+  test('returns null when profile-managed marker is missing', async () => {
+    const {
+      getActiveProviderProfile,
+      switchActiveProviderProfileForModel,
+    } = await importFreshProviderProfileModules()
+
+    const openaiProfile = buildProfile({
+      id: 'openai_profile',
+      provider: 'openai',
+      baseUrl: 'https://api.openai.com/v1',
+      model: 'gpt-4o',
+    })
+    const anthropicProfile = buildProfile({
+      id: 'anthropic_profile',
+      provider: 'anthropic',
+      baseUrl: 'https://api.anthropic.com',
+      model: 'claude-sonnet-4-6',
+    })
+
+    saveMockGlobalConfig(current => ({
+      ...current,
+      providerProfiles: [openaiProfile, anthropicProfile],
+      activeProviderProfileId: openaiProfile.id,
+    }))
+
+    process.env.CLAUDE_CODE_USE_OPENAI = '1'
+    process.env.OPENAI_BASE_URL = openaiProfile.baseUrl
+    process.env.OPENAI_MODEL = openaiProfile.model
+    delete process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED
+    delete process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID
+
+    const switched = switchActiveProviderProfileForModel('sonnet')
+
+    expect(switched).toBeNull()
+    expect(getActiveProviderProfile()?.id).toBe(openaiProfile.id)
+    expect(process.env.CLAUDE_CODE_USE_OPENAI).toBe('1')
+    expect(process.env.OPENAI_BASE_URL).toBe(openaiProfile.baseUrl)
+    expect(process.env.OPENAI_MODEL).toBe(openaiProfile.model)
   })
 })
 

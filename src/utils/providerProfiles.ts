@@ -4,6 +4,8 @@ import {
   saveGlobalConfig,
   type ProviderProfile,
 } from './config.js'
+import { isCodexBaseUrl, shouldUseCodexTransport } from '../services/api/providerConfig.js'
+import { isModelAlias } from './model/aliases.js'
 import type { ModelOption } from './model/modelOptions.js'
 
 export type ProviderPreset =
@@ -40,6 +42,8 @@ const DEFAULT_OLLAMA_MODEL = 'llama3.1:8b'
 const PROFILE_ENV_APPLIED_FLAG = 'CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED'
 const PROFILE_ENV_APPLIED_ID = 'CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID'
 
+type ProviderRoutingTarget = 'anthropic' | 'codex' | 'openai_compatible'
+
 function trimValue(value: string | undefined): string {
   return value?.trim() ?? ''
 }
@@ -47,6 +51,93 @@ function trimValue(value: string | undefined): string {
 function trimOrUndefined(value: string | undefined): string | undefined {
   const trimmed = trimValue(value)
   return trimmed.length > 0 ? trimmed : undefined
+}
+
+function normalizeModelForRouting(model: string): string {
+  const trimmed = trimValue(model).toLowerCase()
+  if (!trimmed) {
+    return ''
+  }
+
+  const baseModel = (trimmed.split('?', 1)[0] ?? trimmed).trim()
+  return baseModel.replace(/\[(1|2)m\]$/i, '').trim()
+}
+
+function classifyModelRoutingTarget(model: string): ProviderRoutingTarget {
+  const normalized = normalizeModelForRouting(model)
+  if (!normalized) {
+    return 'openai_compatible'
+  }
+
+  if (
+    isModelAlias(normalized) ||
+    normalized.startsWith('claude-') ||
+    normalized.includes('.claude-') ||
+    normalized.includes('anthropic.claude')
+  ) {
+    return 'anthropic'
+  }
+
+  if (shouldUseCodexTransport(normalized, undefined) || normalized.includes('codex')) {
+    return 'codex'
+  }
+
+  return 'openai_compatible'
+}
+
+function isCodexProfile(profile: ProviderProfile): boolean {
+  return profile.provider === 'openai' && isCodexBaseUrl(profile.baseUrl)
+}
+
+function profileMatchesRoutingTarget(
+  profile: ProviderProfile,
+  target: ProviderRoutingTarget,
+): boolean {
+  if (target === 'anthropic') {
+    return profile.provider === 'anthropic'
+  }
+
+  if (target === 'codex') {
+    return isCodexProfile(profile)
+  }
+
+  return profile.provider === 'openai'
+}
+
+function selectProfileForModelRouting(
+  model: string,
+  profiles: ProviderProfile[],
+  activeProfile: ProviderProfile | undefined,
+): ProviderProfile | null {
+  const target = classifyModelRoutingTarget(model)
+  const candidates = profiles.filter(profile =>
+    profileMatchesRoutingTarget(profile, target),
+  )
+
+  if (candidates.length === 0) {
+    return null
+  }
+
+  const normalizedModel = normalizeModelForRouting(model)
+  const exactModelMatch = candidates.find(
+    profile => normalizeModelForRouting(profile.model) === normalizedModel,
+  )
+  if (exactModelMatch) {
+    return exactModelMatch
+  }
+
+  if (target === 'openai_compatible') {
+    const nonCodexCandidate = candidates.find(profile => !isCodexProfile(profile))
+    if (nonCodexCandidate) {
+      return nonCodexCandidate
+    }
+  }
+
+  if (activeProfile && candidates.some(profile => profile.id === activeProfile.id)) {
+    return activeProfile
+  }
+
+  return candidates[0] ?? null
 }
 
 function normalizeBaseUrl(value: string): string {
@@ -629,6 +720,36 @@ export function setActiveProviderProfile(
 
   applyProviderProfileToProcessEnv(activeProfile)
   return activeProfile
+}
+
+export function switchActiveProviderProfileForModel(
+  model: string,
+  options?: {
+    processEnv?: NodeJS.ProcessEnv
+  },
+): ProviderProfile | null {
+  const processEnv = options?.processEnv ?? process.env
+  if (processEnv[PROFILE_ENV_APPLIED_FLAG] !== '1') {
+    return null
+  }
+
+  const config = getGlobalConfig()
+  const profiles = getProviderProfiles(config)
+  if (profiles.length === 0) {
+    return null
+  }
+
+  const activeProfile = getActiveProviderProfile(config)
+  const targetProfile = selectProfileForModelRouting(model, profiles, activeProfile)
+  if (!targetProfile) {
+    return null
+  }
+
+  if (targetProfile.id === activeProfile?.id) {
+    return targetProfile
+  }
+
+  return setActiveProviderProfile(targetProfile.id)
 }
 
 export function deleteProviderProfile(profileId: string): {

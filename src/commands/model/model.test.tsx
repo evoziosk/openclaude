@@ -1,7 +1,6 @@
 import { afterEach, expect, mock, test } from 'bun:test'
 
 import { getAdditionalModelOptionsCacheScope } from '../../services/api/providerConfig.js'
-import { getAPIProvider } from '../../utils/model/providers.js'
 
 const originalEnv = {
   CLAUDE_CODE_USE_OPENAI: process.env.CLAUDE_CODE_USE_OPENAI,

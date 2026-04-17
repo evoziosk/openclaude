@@ -527,6 +527,72 @@ describe('Codex request translation', () => {
     ])
   })
 
+  test('normalizes Codex SSE plain-string Bash arguments into JSON object input', async () => {
+    const responseText = [
+      'event: response.output_item.added',
+      'data: {"type":"response.output_item.added","item":{"id":"fc_1","type":"function_call","status":"in_progress","name":"Bash","arguments":"pwd","call_id":"call_1"},"output_index":0,"sequence_number":0}',
+      '',
+      'event: response.output_item.done',
+      'data: {"type":"response.output_item.done","item":{"id":"fc_1","type":"function_call","status":"completed","name":"Bash","arguments":"pwd","call_id":"call_1"},"output_index":0,"sequence_number":1}',
+      '',
+      'event: response.completed',
+      'data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","model":"gpt-5.4","output":[{"type":"function_call","id":"fc_1","call_id":"call_1","name":"Bash","arguments":"pwd"}],"usage":{"input_tokens":2,"output_tokens":1}},"sequence_number":2}',
+      '',
+    ].join('\n')
+
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(responseText))
+        controller.close()
+      },
+    })
+
+    const inputJsonDeltas: string[] = []
+    for await (const event of codexStreamToAnthropic(
+      new Response(stream),
+      'gpt-5.4',
+    )) {
+      if (
+        event.type === 'content_block_delta' &&
+        event.delta?.type === 'input_json_delta' &&
+        typeof event.delta.partial_json === 'string'
+      ) {
+        inputJsonDeltas.push(event.delta.partial_json)
+      }
+    }
+
+    expect(inputJsonDeltas).toEqual(['{"command":"pwd"}'])
+  })
+
+  test('normalizes plain-string Bash arguments in completed Codex responses', () => {
+    const message = convertCodexResponseToAnthropicMessage(
+      {
+        id: 'resp_1',
+        model: 'gpt-5.4',
+        output: [
+          {
+            type: 'function_call',
+            id: 'fc_1',
+            call_id: 'call_1',
+            name: 'Bash',
+            arguments: 'pwd',
+          },
+        ],
+        usage: { input_tokens: 12, output_tokens: 4 },
+      },
+      'gpt-5.4',
+    )
+
+    expect(message.content).toEqual([
+      {
+        type: 'tool_use',
+        id: 'call_1',
+        name: 'Bash',
+        input: { command: 'pwd' },
+      },
+    ])
+  })
+
   test('strips leaked reasoning preamble from Codex SSE text stream', async () => {
     const responseText = [
       'event: response.output_item.added',

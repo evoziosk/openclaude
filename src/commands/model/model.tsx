@@ -4,7 +4,6 @@ import * as React from 'react';
 import type { CommandResultDisplay } from '../../commands.js';
 import { ModelPicker } from '../../components/ModelPicker.js';
 import { COMMON_HELP_ARGS, COMMON_INFO_ARGS } from '../../constants/xml.js';
-import { fetchBootstrapData } from '../../services/api/bootstrap.js';
 import { type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS, logEvent } from '../../services/analytics/index.js';
 import { useAppState, useSetAppState } from '../../state/AppState.js';
 import type { LocalJSXCommandCall } from '../../types/command.js';
@@ -15,8 +14,13 @@ import { MODEL_ALIASES } from '../../utils/model/aliases.js';
 import { checkOpus1mAccess, checkSonnet1mAccess } from '../../utils/model/check1mAccess.js';
 import type { ModelOption } from '../../utils/model/modelOptions.js';
 import { discoverOpenAICompatibleModelOptions } from '../../utils/model/openaiModelDiscovery.js';
-import { getAPIProvider } from '../../utils/model/providers.js';
-import { getActiveOpenAIModelOptionsCache, setActiveOpenAIModelOptionsCache } from '../../utils/providerProfiles.js';
+import {
+  getActiveOpenAIModelOptionsCache,
+  getActiveProviderProfile,
+  setActiveOpenAIModelOptionsCache,
+  setActiveProviderProfile,
+  switchActiveProviderProfileForModel,
+} from '../../utils/providerProfiles.js';
 import { getDefaultMainLoopModelSetting, isOpus1mMergeEnabled, renderDefaultModelSetting } from '../../utils/model/model.js';
 import { isModelAllowed } from '../../utils/model/modelAllowlist.js';
 import { validateModel } from '../../utils/model/validateModel.js';
@@ -174,6 +178,17 @@ function SetModelAndClose({
         return;
       }
 
+      const profileManagedSession = process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED === '1';
+      const profileBeforeValidation = profileManagedSession ? getActiveProviderProfile() : undefined;
+      const selectedProfile = profileManagedSession ? switchActiveProviderProfileForModel(model) : null;
+      const switchedProfile = profileBeforeValidation !== undefined && selectedProfile !== null && profileBeforeValidation.id !== selectedProfile.id;
+
+      const rollbackProfileSelection = () => {
+        if (switchedProfile) {
+          setActiveProviderProfile(profileBeforeValidation.id);
+        }
+      };
+
       // Skip validation for known aliases - they're predefined and should work
       if (isKnownAlias(model)) {
         setModel(model);
@@ -191,11 +206,13 @@ function SetModelAndClose({
         if (valid) {
           setModel(model);
         } else {
+          rollbackProfileSelection();
           onDone(error_0 || `Model '${model}' not found`, {
             display: 'system'
           });
         }
       } catch (error) {
+        rollbackProfileSelection();
         onDone(`Failed to validate model: ${(error as Error).message}`, {
           display: 'system'
         });
