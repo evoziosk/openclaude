@@ -10,15 +10,22 @@ import {
 } from '../../components/CustomSelect/index.js'
 import { Dialog } from '../../components/design-system/Dialog.js'
 import { LoadingState } from '../../components/design-system/LoadingState.js'
+import { useCodexOAuthFlow } from '../../components/useCodexOAuthFlow.js'
 import { useTerminalSize } from '../../hooks/useTerminalSize.js'
 import { Box, Text } from '../../ink.js'
+import {
+  type CodexOAuthTokens,
+} from '../../services/api/codexOAuth.js'
 import {
   DEFAULT_CODEX_BASE_URL,
   DEFAULT_OPENAI_BASE_URL,
   isLocalProviderUrl,
+  resolveCodexApiCredentials,
   resolveProviderRequest,
 } from '../../services/api/providerConfig.js'
 import {
+  applySavedProfileToCurrentSession as applySharedProfileToCurrentSession,
+  buildCodexOAuthProfileEnv as buildSharedCodexOAuthProfileEnv,
   buildCodexProfileEnv,
   buildGeminiProfileEnv,
   buildMistralProfileEnv,
@@ -44,11 +51,11 @@ import {
   getGeminiProjectIdHint,
   mayHaveGeminiAdcCredentials,
 } from '../../utils/geminiAuth.js'
-import { runCodexOauthLogin } from '../../utils/codexOauth.js'
 import {
   readGeminiAccessToken,
   saveGeminiAccessToken,
 } from '../../utils/geminiCredentials.js'
+import { isBareMode } from '../../utils/envUtils.js'
 import {
   getGoalDefaultOpenAIModel,
   normalizeRecommendationGoal,
@@ -57,12 +64,13 @@ import {
   type RecommendationGoal,
 } from '../../utils/providerRecommendation.js'
 import {
+  getOllamaChatBaseUrl,
   getLocalOpenAICompatibleProviderLabel,
   hasLocalOllama,
   listOllamaModels,
 } from '../../utils/providerDiscovery.js'
 
-type ProviderChoice = 'auto' | ProviderProfile | 'clear'
+type ProviderChoice = 'auto' | ProviderProfile | 'codex-oauth' | 'clear'
 
 type Step =
   | { name: 'choose' }
@@ -93,8 +101,8 @@ type Step =
       apiKey?: string
       authMode: 'api-key' | 'access-token' | 'adc'
     }
+  | { name: 'codex-oauth' }
   | { name: 'codex-check' }
-  | { name: 'codex-oauth-login' }
 
 type CurrentProviderSummary = {
   providerLabel: string
@@ -124,26 +132,6 @@ type TextEntryDialogProps = {
   onCancel: () => void
 }
 
-
-type CodexModelAlias = 'codexplan' | 'codexspark'
-
-const CODEX_MODELS: Array<{
-  label: CodexModelAlias
-  value: CodexModelAlias
-  description: string
-}> = [
-  {
-    label: 'codexplan',
-    value: 'codexplan',
-    description: 'GPT-5.4 with higher reasoning on the Codex backend',
-  },
-  {
-    label: 'codexspark',
-    value: 'codexspark',
-    description: 'Faster Codex Spark tool loop profile',
-  },
-]
-
 type ProviderWizardDefaults = {
   openAIModel: string
   openAIBaseUrl: string
@@ -152,31 +140,17 @@ type ProviderWizardDefaults = {
   mistralBaseUrl: string
 }
 
+type SecretSourceEnv = NodeJS.ProcessEnv & Partial<ProfileEnv>
+
 function isEnvTruthy(value: string | undefined): boolean {
   if (!value) return false
   const normalized = value.trim().toLowerCase()
   return normalized !== '' && normalized !== '0' && normalized !== 'false' && normalized !== 'no'
 }
 
-function hasMultipleProvidersActive(
-  processEnv: NodeJS.ProcessEnv = process.env,
-): boolean {
-  const activeFlags = [
-    processEnv.CLAUDE_CODE_USE_GITHUB,
-    processEnv.CLAUDE_CODE_USE_GEMINI,
-    processEnv.CLAUDE_CODE_USE_MISTRAL,
-    processEnv.CLAUDE_CODE_USE_BEDROCK,
-    processEnv.CLAUDE_CODE_USE_VERTEX,
-    processEnv.CLAUDE_CODE_USE_FOUNDRY,
-    processEnv.CLAUDE_CODE_USE_OPENAI,
-  ].filter(value => isEnvTruthy(value))
-
-  return activeFlags.length > 1
-}
-
 function getSafeDisplayValue(
   value: string | undefined,
-  processEnv: NodeJS.ProcessEnv,
+  processEnv: SecretSourceEnv,
   profileEnv?: ProfileEnv,
   fallback = '(not set)',
 ): string {
@@ -188,14 +162,15 @@ function getSafeDisplayValue(
 export function getProviderWizardDefaults(
   processEnv: NodeJS.ProcessEnv = process.env,
 ): ProviderWizardDefaults {
+  const secretSource = processEnv as SecretSourceEnv
   const safeOpenAIModel =
-    sanitizeProviderConfigValue(processEnv.OPENAI_MODEL, processEnv) ||
+    sanitizeProviderConfigValue(processEnv.OPENAI_MODEL, secretSource) ||
     'gpt-4o'
   const safeOpenAIBaseUrl =
-    sanitizeProviderConfigValue(processEnv.OPENAI_BASE_URL, processEnv) ||
+    sanitizeProviderConfigValue(processEnv.OPENAI_BASE_URL, secretSource) ||
     DEFAULT_OPENAI_BASE_URL
   const safeGeminiModel =
-    sanitizeProviderConfigValue(processEnv.GEMINI_MODEL, processEnv) ||
+    sanitizeProviderConfigValue(processEnv.GEMINI_MODEL, secretSource) ||
     DEFAULT_GEMINI_MODEL
   const safeMistralModel =
     sanitizeProviderConfigValue(processEnv.MISTRAL_MODEL, processEnv) ||
@@ -218,31 +193,20 @@ export function buildCurrentProviderSummary(options?: {
   persisted?: ProfileFile | null
 }): CurrentProviderSummary {
   const processEnv = options?.processEnv ?? process.env
+  const secretSource = processEnv as SecretSourceEnv
   const persisted = options?.persisted ?? loadProfileFile()
   const savedProfileLabel = persisted?.profile ?? 'none'
-
-  if (hasMultipleProvidersActive(processEnv)) {
-    return {
-      providerLabel: 'Invalid provider state (multiple active flags)',
-      modelLabel: getSafeDisplayValue(processEnv.OPENAI_MODEL, processEnv),
-      endpointLabel: getSafeDisplayValue(
-        processEnv.OPENAI_BASE_URL ?? processEnv.OPENAI_API_BASE,
-        processEnv,
-      ),
-      savedProfileLabel,
-    }
-  }
 
   if (isEnvTruthy(processEnv.CLAUDE_CODE_USE_GEMINI)) {
     return {
       providerLabel: 'Google Gemini',
       modelLabel: getSafeDisplayValue(
         processEnv.GEMINI_MODEL ?? DEFAULT_GEMINI_MODEL,
-        processEnv,
+        secretSource,
       ),
       endpointLabel: getSafeDisplayValue(
         processEnv.GEMINI_BASE_URL ?? DEFAULT_GEMINI_BASE_URL,
-        processEnv,
+        secretSource,
       ),
       savedProfileLabel,
     }
@@ -268,13 +232,13 @@ export function buildCurrentProviderSummary(options?: {
       providerLabel: 'GitHub Models',
       modelLabel: getSafeDisplayValue(
         processEnv.OPENAI_MODEL ?? 'github:copilot',
-        processEnv,
+        secretSource,
       ),
       endpointLabel: getSafeDisplayValue(
         processEnv.OPENAI_BASE_URL ??
           processEnv.OPENAI_API_BASE ??
           'https://models.github.ai/inference',
-        processEnv,
+        secretSource,
       ),
       savedProfileLabel,
     }
@@ -295,8 +259,8 @@ export function buildCurrentProviderSummary(options?: {
 
     return {
       providerLabel,
-      modelLabel: getSafeDisplayValue(request.requestedModel, processEnv),
-      endpointLabel: getSafeDisplayValue(request.baseUrl, processEnv),
+      modelLabel: getSafeDisplayValue(request.requestedModel, secretSource),
+      endpointLabel: getSafeDisplayValue(request.baseUrl, secretSource),
       savedProfileLabel,
     }
   }
@@ -307,11 +271,11 @@ export function buildCurrentProviderSummary(options?: {
       processEnv.ANTHROPIC_MODEL ??
         processEnv.CLAUDE_MODEL ??
         'claude-sonnet-4-6',
-      processEnv,
+      secretSource,
     ),
     endpointLabel: getSafeDisplayValue(
       processEnv.ANTHROPIC_BASE_URL ?? 'https://api.anthropic.com',
-      processEnv,
+      secretSource,
     ),
     savedProfileLabel,
   }
@@ -425,6 +389,10 @@ export function buildProfileSaveMessage(
   profile: ProviderProfile,
   env: ProfileEnv,
   filePath: string,
+  options?: {
+    activatedInSession?: boolean
+    activationWarning?: string | null
+  },
 ): string {
   const summary = buildSavedProfileSummary(profile, env)
   const lines = [
@@ -438,13 +406,24 @@ export function buildProfileSaveMessage(
   }
 
   lines.push(`Profile: ${filePath}`)
-  lines.push('Restart OpenClaude to use it.')
+  if (options?.activatedInSession) {
+    lines.push('OpenClaude switched to it for this session.')
+  } else if (options?.activationWarning) {
+    lines.push(
+      `Saved for next startup. Warning: could not activate it in this session (${options.activationWarning}).`,
+    )
+  } else {
+    lines.push('Restart OpenClaude to use it.')
+  }
 
   return lines.join('\n')
 }
 
 function buildUsageText(): string {
   const summary = buildCurrentProviderSummary()
+  const availableProviders = isBareMode()
+    ? 'Choose Auto, Ollama, OpenAI-compatible, Gemini, or Codex, then save a provider profile.'
+    : 'Choose Auto, Ollama, OpenAI-compatible, Gemini, Codex, or Codex OAuth, then save a provider profile.'
   return [
     'Usage: /provider',
     '',
@@ -455,7 +434,7 @@ function buildUsageText(): string {
     `Current endpoint: ${summary.endpointLabel}`,
     `Saved profile: ${summary.savedProfileLabel}`,
     '',
-    'Choose Auto, Ollama, OpenAI-compatible, Gemini, or Codex, then save a profile for the next OpenClaude restart.',
+    availableProviders,
   ].join('\n')
 }
 
@@ -464,12 +443,45 @@ function finishProfileSave(
   profile: ProviderProfile,
   env: ProfileEnv,
 ): void {
+  void saveProfileAndNotify(onDone, profile, env)
+}
+
+export function buildCodexOAuthProfileEnv(
+  tokens: Pick<CodexOAuthTokens, 'accessToken' | 'idToken' | 'accountId'>,
+): ProfileEnv | null {
+  return buildSharedCodexOAuthProfileEnv(tokens)
+}
+
+export async function applySavedProfileToCurrentSession(options: {
+  profileFile: ProfileFile
+  processEnv?: NodeJS.ProcessEnv
+}): Promise<string | null> {
+  return applySharedProfileToCurrentSession(options)
+}
+
+async function saveProfileAndNotify(
+  onDone: LocalJSXCommandOnDone,
+  profile: ProviderProfile,
+  env: ProfileEnv,
+): Promise<void> {
   try {
     const profileFile = createProfileFile(profile, env)
     const filePath = saveProfileFile(profileFile)
-    onDone(buildProfileSaveMessage(profile, env, filePath), {
-      display: 'system',
-    })
+    const shouldActivateInSession = profile === 'codex'
+    const activationWarning = shouldActivateInSession
+      ? await applySharedProfileToCurrentSession({ profileFile })
+      : null
+
+    onDone(
+      buildProfileSaveMessage(profile, env, filePath, {
+        activatedInSession:
+          shouldActivateInSession && activationWarning === null,
+        activationWarning,
+      }),
+      {
+        display: 'system',
+      },
+    )
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     onDone(`Failed to save provider profile: ${message}`, {
@@ -553,6 +565,10 @@ function ProviderChooser({
   onCancel: () => void
 }): React.ReactNode {
   const summary = buildCurrentProviderSummary()
+  const canUseCodexOAuth = !isBareMode()
+  const helperText = canUseCodexOAuth
+    ? 'Save a provider profile without editing environment variables first. Codex profiles backed by env, auth.json, or OpenClaude secure storage can switch this session immediately when validation succeeds.'
+    : 'Save a provider profile without editing environment variables first. Codex profiles backed by env or auth.json can switch this session immediately.'
   const options: OptionWithDescription<ProviderChoice>[] = [
     {
       label: 'Auto',
@@ -586,6 +602,16 @@ function ProviderChooser({
       value: 'codex',
       description: 'Use existing ChatGPT Codex CLI auth or env credentials',
     },
+    ...(canUseCodexOAuth
+      ? [
+          {
+            label: 'Codex OAuth',
+            value: 'codex-oauth' as const,
+            description:
+              'Sign in with ChatGPT in your browser and store Codex tokens securely',
+          },
+        ]
+      : []),
   ]
 
   if (summary.savedProfileLabel !== 'none') {
@@ -603,10 +629,7 @@ function ProviderChooser({
       onCancel={onCancel}
     >
       <Box flexDirection="column" gap={1}>
-        <Text>
-          Save a provider profile for the next OpenClaude restart without
-          editing environment variables first.
-        </Text>
+        <Text>{helperText}</Text>
         <Box flexDirection="column">
           <Text dimColor>Current model: {summary.modelLabel}</Text>
           <Text dimColor>Current endpoint: {summary.endpointLabel}</Text>
@@ -758,7 +781,9 @@ function AutoRecommendationStep({
               { label: 'Back', value: 'back' },
               { label: 'Cancel', value: 'cancel' },
             ]}
-            onChange={value => (value === 'back' ? onBack() : onCancel())}
+            onChange={(value: string) =>
+              value === 'back' ? onBack() : onCancel()
+            }
             onCancel={onCancel}
           />
         </Box>
@@ -781,7 +806,7 @@ function AutoRecommendationStep({
               { label: 'Back', value: 'back' },
               { label: 'Cancel', value: 'cancel' },
             ]}
-            onChange={value => {
+            onChange={(value: string) => {
               if (value === 'continue') {
                 onNeedOpenAI(status.defaultModel)
               } else if (value === 'back') {
@@ -814,7 +839,7 @@ function AutoRecommendationStep({
             { label: 'Back', value: 'back' },
             { label: 'Cancel', value: 'cancel' },
           ]}
-          onChange={value => {
+          onChange={(value: string) => {
             if (value === 'save') {
               onSave(
                 'ollama',
@@ -916,7 +941,9 @@ function OllamaModelStep({
               { label: 'Back', value: 'back' },
               { label: 'Cancel', value: 'cancel' },
             ]}
-            onChange={value => (value === 'back' ? onBack() : onCancel())}
+            onChange={(value: string) =>
+              value === 'back' ? onBack() : onCancel()
+            }
             onCancel={onCancel}
           />
         </Box>
@@ -937,7 +964,7 @@ function OllamaModelStep({
           defaultFocusValue={status.defaultValue}
           inlineDescriptions
           visibleOptionCount={Math.min(8, status.options.length)}
-          onChange={value => {
+          onChange={(value: string) => {
             onSave(
               'ollama',
               buildOllamaProfileEnv(value, {
@@ -952,16 +979,92 @@ function OllamaModelStep({
   )
 }
 
-function CodexCredentialStep({
+function CodexOAuthStep({
   onSave,
   onBack,
   onCancel,
-  onStartOauthLogin,
 }: {
   onSave: (profile: ProviderProfile, env: ProfileEnv) => void
   onBack: () => void
   onCancel: () => void
-  onStartOauthLogin: () => void
+}): React.ReactNode {
+  const handleAuthenticated = React.useCallback(async (
+    tokens: CodexOAuthTokens,
+    persistCredentials: (options?: { profileId?: string }) => void,
+  ) => {
+    const env = buildCodexOAuthProfileEnv(tokens)
+    if (!env) {
+      throw new Error(
+        'Codex OAuth succeeded, but OpenClaude could not build a Codex profile from the stored credentials.',
+      )
+    }
+
+    persistCredentials()
+    onSave('codex', env)
+  }, [onSave])
+
+  const status = useCodexOAuthFlow({
+    onAuthenticated: handleAuthenticated,
+  })
+
+  if (status.state === 'error') {
+    return (
+      <Dialog title="Codex OAuth failed" onCancel={onCancel} color="warning">
+        <Box flexDirection="column" gap={1}>
+          <Text>{status.message}</Text>
+          <Select
+            options={[
+              { label: 'Back', value: 'back' },
+              { label: 'Cancel', value: 'cancel' },
+            ]}
+            onChange={(value: string) =>
+              value === 'back' ? onBack() : onCancel()
+            }
+            onCancel={onCancel}
+          />
+        </Box>
+      </Dialog>
+    )
+  }
+
+  if (status.state === 'starting') {
+    return <LoadingState message="Starting Codex OAuth..." />
+  }
+
+  return (
+    <Dialog title="Codex OAuth" onCancel={onBack}>
+      <Box flexDirection="column" gap={1}>
+        <Text>
+          Finish signing in with ChatGPT in your browser. OpenClaude will store
+          the resulting Codex credentials securely for future sessions.
+        </Text>
+        {status.browserOpened === false ? (
+          <Text color="warning">
+            Browser did not open automatically. Visit this URL to continue:
+          </Text>
+        ) : status.browserOpened === true ? (
+          <Text dimColor>
+            Browser opened. Complete the sign-in there, then OpenClaude will
+            finish setup automatically.
+          </Text>
+        ) : (
+          <Text dimColor>Opening your browser...</Text>
+        )}
+        <Text>{status.authUrl}</Text>
+        <Text dimColor>Press Esc to cancel and go back.</Text>
+      </Box>
+    </Dialog>
+  )
+}
+
+function CodexCredentialStep({
+  onSave,
+  onBack,
+  onCancel,
+}: {
+  onSave: (profile: ProviderProfile, env: ProfileEnv) => void
+  onBack: () => void
+  onCancel: () => void
 }): React.ReactNode {
   const credentials = resolveCodexCredentials(process.env)
 
@@ -972,37 +1075,31 @@ function CodexCredentialStep({
           <Text>{credentials.message}</Text>
           <Select
             options={[
-              {
-                label: 'Sign in with OpenAI OAuth',
-                value: 'oauth' as const,
-                description: 'Run `codex login` and use that auth for Codex models',
-              },
-              {
-                label: 'Back',
-                value: 'back' as const,
-              },
-              {
-                label: 'Cancel',
-                value: 'cancel' as const,
-              },
+              { label: 'Back', value: 'back' },
+              { label: 'Cancel', value: 'cancel' },
             ]}
-            onChange={value => {
-              if (value === 'oauth') {
-                onStartOauthLogin()
-                return
-              }
-              if (value === 'back') {
-                onBack()
-                return
-              }
-              onCancel()
-            }}
+            onChange={(value: string) =>
+              value === 'back' ? onBack() : onCancel()
+            }
             onCancel={onCancel}
           />
         </Box>
       </Dialog>
     )
   }
+
+  const options: OptionWithDescription<string>[] = [
+    {
+      label: 'codexplan',
+      value: 'codexplan',
+      description: 'GPT-5.4 with higher reasoning on the Codex backend',
+    },
+    {
+      label: 'codexspark',
+      value: 'codexspark',
+      description: 'Faster Codex Spark tool loop profile',
+    },
+  ]
 
   return (
     <Dialog title="Choose a Codex profile" onCancel={onBack}>
@@ -1012,13 +1109,17 @@ function CodexCredentialStep({
           {credentials.sourceDescription} and save a model alias profile.
         </Text>
         <Select
-          options={CODEX_MODELS}
+          options={options}
           defaultValue="codexplan"
           defaultFocusValue="codexplan"
           inlineDescriptions
-          visibleOptionCount={CODEX_MODELS.length}
-          onChange={value => {
-            const env = buildCodexModelEnv(value, process.env)
+          visibleOptionCount={options.length}
+          onChange={(value: string) => {
+            const env = buildCodexProfileEnv({
+              model: value,
+              credentialSource: credentials.credentialSource,
+              processEnv: process.env,
+            })
             if (env) {
               onSave('codex', env)
             }
@@ -1029,17 +1130,18 @@ function CodexCredentialStep({
     </Dialog>
   )
 }
-function buildCodexModelEnv(
-  model: CodexModelAlias,
-  processEnv: NodeJS.ProcessEnv = process.env,
-): ProfileEnv | null {
-  return buildCodexProfileEnv({ model, processEnv })
-}
 
 function resolveCodexCredentials(processEnv: NodeJS.ProcessEnv):
-  | { ok: true; sourceDescription: string }
+  | {
+      ok: true
+      sourceDescription: string
+      credentialSource: 'oauth' | 'existing'
+    }
   | { ok: false; message: string } {
   const credentials = resolveCodexApiCredentials(processEnv)
+  const oauthHint = isBareMode()
+    ? 'Re-login with the Codex CLI'
+    : 'Choose Codex OAuth in /provider, or re-login with the Codex CLI'
 
   if (!credentials.apiKey) {
     const authHint = credentials.authPath
@@ -1047,7 +1149,7 @@ function resolveCodexCredentials(processEnv: NodeJS.ProcessEnv):
       : 'Set CODEX_API_KEY or re-login with the Codex CLI.'
     return {
       ok: false,
-      message: `Codex setup needs existing credentials. Re-login with the Codex CLI or set CODEX_API_KEY. ${authHint}`,
+      message: `Codex setup needs existing credentials. ${oauthHint}, or set CODEX_API_KEY. ${authHint}`,
     }
   }
 
@@ -1055,15 +1157,19 @@ function resolveCodexCredentials(processEnv: NodeJS.ProcessEnv):
     return {
       ok: false,
       message:
-        'Codex auth is missing chatgpt_account_id. Re-login with the Codex CLI or set CHATGPT_ACCOUNT_ID/CODEX_ACCOUNT_ID first.',
+        `Codex auth is missing chatgpt_account_id. ${oauthHint}, or set CHATGPT_ACCOUNT_ID/CODEX_ACCOUNT_ID first.`,
     }
   }
 
   return {
     ok: true,
+    credentialSource:
+      credentials.source === 'secure-storage' ? 'oauth' : 'existing',
     sourceDescription:
       credentials.source === 'env'
         ? 'the current shell environment'
+        : credentials.source === 'secure-storage'
+          ? 'OpenClaude secure storage'
         : credentials.authPath ?? DEFAULT_CODEX_BASE_URL,
   }
 }
@@ -1097,6 +1203,8 @@ export function ProviderWizard({
                 name: 'mistral-key',
                 defaultModel: defaults.mistralModel,
               })
+            } else if (value === 'codex-oauth') {
+              setStep({ name: 'codex-oauth' })
             } else if (value === 'clear') {
               const filePath = deleteProfileFile()
               onDone(`Removed saved provider profile at ${filePath}. Restart OpenClaude to go back to normal startup.`, {
@@ -1376,7 +1484,7 @@ export function ProviderWizard({
               options={options}
               inlineDescriptions
               visibleOptionCount={options.length}
-              onChange={value => {
+              onChange={(value: string) => {
                 if (value === 'api-key') {
                   setStep({ name: 'gemini-key' })
                 } else if (value === 'access-token') {
@@ -1533,72 +1641,17 @@ export function ProviderWizard({
         />
       )
 
-    case 'codex-oauth-login':
+    case 'codex-oauth':
       return (
-        <Dialog title="Codex OAuth login" onCancel={() => setStep({ name: 'codex-check' })}>
-          <Box flexDirection="column" gap={1}>
-            <Text>
-              This will run <Text bold>codex login</Text> in your terminal to
-              authorize with OpenAI OAuth.
-            </Text>
-            <Text dimColor>
-              After login succeeds, a Codex profile using codexplan will be saved.
-            </Text>
-            <Select
-              options={[
-                {
-                  label: 'Start login',
-                  value: 'start' as const,
-                  description: 'Launch codex login now',
-                },
-                {
-                  label: 'Back',
-                  value: 'back' as const,
-                },
-                {
-                  label: 'Cancel',
-                  value: 'cancel' as const,
-                },
-              ]}
-              onChange={value => {
-                if (value === 'back') {
-                  setStep({ name: 'codex-check' })
-                  return
-                }
-                if (value === 'cancel') {
-                  onDone()
-                  return
-                }
-
-                void (async () => {
-                  const result = await runCodexOauthLogin()
-                  if (!result.ok) {
-                    onDone(result.message, { display: 'system' })
-                    setStep({ name: 'codex-check' })
-                    return
-                  }
-
-                  const env = buildCodexModelEnv('codexplan', process.env)
-                  if (!env) {
-                    onDone(
-                      'Codex login succeeded, but profile save failed. Run /provider and choose Codex again.',
-                      { display: 'system' },
-                    )
-                    setStep({ name: 'codex-check' })
-                    return
-                  }
-
-                  finishProfileSave(onDone, 'codex', env)
-                })()
-              }}
-              onCancel={() => setStep({ name: 'codex-check' })}
-              visibleOptionCount={3}
-            />
-          </Box>
-        </Dialog>
+        <CodexOAuthStep
+          onSave={(profile, env) => finishProfileSave(onDone, profile, env)}
+          onBack={() => setStep({ name: 'choose' })}
+          onCancel={() => onDone()}
+        />
       )
   }
 }
+
 export const call: LocalJSXCommandCall = async (onDone, _context, args) => {
   const trimmedArgs = args?.trim().toLowerCase() ?? ''
 
@@ -1631,8 +1684,3 @@ export const call: LocalJSXCommandCall = async (onDone, _context, args) => {
     />
   )
 }
-
-
-
-
-

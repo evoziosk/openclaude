@@ -22,7 +22,12 @@
  */
 
 import { APIError } from '@anthropic-ai/sdk'
-import { isEnvTruthy } from '../../utils/envUtils.js'
+import {
+  readCodexCredentialsAsync,
+  refreshCodexAccessTokenIfNeeded,
+} from '../../utils/codexCredentials.js'
+import { logForDebugging } from '../../utils/debug.js'
+import { isBareMode, isEnvTruthy } from '../../utils/envUtils.js'
 import { resolveGeminiCredential } from '../../utils/geminiAuth.js'
 import { hydrateGeminiAccessTokenFromSecureStorage } from '../../utils/geminiCredentials.js'
 import {
@@ -45,12 +50,18 @@ import {
   type AnthropicUsage,
   type ShimCreateParams,
 } from './codexShim.js'
+import { fetchWithProxyRetry } from './fetchWithProxyRetry.js'
 import {
   isLocalProviderUrl,
-  resolveCodexApiCredentials,
+  resolveRuntimeCodexCredentials,
   resolveProviderRequest,
   getGithubEndpointType,
 } from './providerConfig.js'
+import {
+  buildOpenAICompatibilityErrorMessage,
+  classifyOpenAIHttpFailure,
+  classifyOpenAINetworkFailure,
+} from './openaiErrorClassification.js'
 import { sanitizeSchemaForOpenAICompat } from '../../utils/schemaSanitizer.js'
 import { redactSecretValueForDisplay } from '../../utils/providerProfile.js'
 import {
@@ -79,6 +90,19 @@ const COPILOT_HEADERS: Record<string, string> = {
   'Editor-Plugin-Version': 'copilot-chat/0.26.7',
   'Copilot-Integration-Id': 'vscode-chat',
 }
+
+const SENSITIVE_URL_QUERY_PARAM_NAMES = [
+  'api_key',
+  'key',
+  'token',
+  'access_token',
+  'refresh_token',
+  'signature',
+  'sig',
+  'secret',
+  'password',
+  'authorization',
+]
 
 function isGithubModelsMode(): boolean {
   return isEnvTruthy(process.env.CLAUDE_CODE_USE_GITHUB)
@@ -127,6 +151,34 @@ function hasGeminiApiHost(baseUrl: string | undefined): boolean {
 function formatRetryAfterHint(response: Response): string {
   const ra = response.headers.get('retry-after')
   return ra ? ` (Retry-After: ${ra})` : ''
+}
+
+function shouldRedactUrlQueryParam(name: string): boolean {
+  const lower = name.toLowerCase()
+  return SENSITIVE_URL_QUERY_PARAM_NAMES.some(token => lower.includes(token))
+}
+
+function redactUrlForDiagnostics(url: string): string {
+  try {
+    const parsed = new URL(url)
+    if (parsed.username) {
+      parsed.username = 'redacted'
+    }
+    if (parsed.password) {
+      parsed.password = 'redacted'
+    }
+
+    for (const key of parsed.searchParams.keys()) {
+      if (shouldRedactUrlQueryParam(key)) {
+        parsed.searchParams.set(key, 'redacted')
+      }
+    }
+
+    const serialized = parsed.toString()
+    return redactSecretValueForDisplay(serialized, process.env as SecretValueSource) ?? serialized
+  } catch {
+    return redactSecretValueForDisplay(url, process.env as SecretValueSource) ?? url
+  }
 }
 
 function sleepMs(ms: number): Promise<void> {
@@ -179,35 +231,61 @@ function convertSystemPrompt(
   return String(system)
 }
 
-function convertToolResultContent(content: unknown): string {
-  if (typeof content === 'string') return content
-  if (!Array.isArray(content)) return JSON.stringify(content ?? '')
+function convertToolResultContent(
+  content: unknown,
+  isError?: boolean,
+): string | Array<{ type: string; text?: string; image_url?: { url: string } }> {
+  if (typeof content === 'string') {
+    return isError ? `Error: ${content}` : content
+  }
+  if (!Array.isArray(content)) {
+    const text = JSON.stringify(content ?? '')
+    return isError ? `Error: ${text}` : text
+  }
 
-  const chunks: string[] = []
+  const parts: Array<{
+    type: string
+    text?: string
+    image_url?: { url: string }
+  }> = []
   for (const block of content) {
     if (block?.type === 'text' && typeof block.text === 'string') {
-      chunks.push(block.text)
+      parts.push({ type: 'text', text: block.text })
       continue
     }
 
     if (block?.type === 'image') {
       const source = block.source
       if (source?.type === 'url' && source.url) {
-        chunks.push(`[Image](${source.url})`)
-      } else if (source?.type === 'base64') {
-        chunks.push(`[image:${source.media_type ?? 'unknown'}]`)
-      } else {
-        chunks.push('[image]')
+        parts.push({ type: 'image_url', image_url: { url: source.url } })
+      } else if (source?.type === 'base64' && source.media_type && source.data) {
+        parts.push({
+          type: 'image_url',
+          image_url: {
+            url: `data:${source.media_type};base64,${source.data}`,
+          },
+        })
       }
       continue
     }
 
     if (typeof block?.text === 'string') {
-      chunks.push(block.text)
+      parts.push({ type: 'text', text: block.text })
     }
   }
 
-  return chunks.join('\n')
+  if (parts.length === 0) return ''
+  if (parts.length === 1 && parts[0].type === 'text') {
+    const text = parts[0].text ?? ''
+    return isError ? `Error: ${text}` : text
+  }
+  if (isError && parts[0]?.type === 'text') {
+    parts[0] = { ...parts[0], text: `Error: ${parts[0].text ?? ''}` }
+  } else if (isError) {
+    parts.unshift({ type: 'text', text: 'Error:' })
+  }
+
+  return parts
 }
 
 function convertContentBlocks(
@@ -295,11 +373,10 @@ function convertMessages(
 
         // Emit tool results as tool messages
         for (const tr of toolResults) {
-          const trContent = convertToolResultContent(tr.content)
           result.push({
             role: 'tool',
             tool_call_id: tr.tool_use_id ?? 'unknown',
-            content: tr.is_error ? `Error: ${trContent}` : trContent,
+            content: convertToolResultContent(tr.content, tr.is_error),
           })
         }
 
@@ -614,6 +691,7 @@ function repairPossiblyTruncatedObjectJson(raw: string): string | null {
 async function* openaiStreamToAnthropic(
   response: Response,
   model: string,
+  signal?: AbortSignal,
 ): AsyncGenerator<AnthropicStreamEvent> {
   const messageId = makeMessageId()
   let contentBlockIndex = 0
@@ -661,6 +739,51 @@ async function* openaiStreamToAnthropic(
 
   const decoder = new TextDecoder()
   let buffer = ''
+  const STREAM_IDLE_TIMEOUT_MS = 120_000 // 2 minutes without data = connection likely dead
+  let lastDataTime = Date.now()
+
+  /**
+   * Read from the stream with an idle timeout. If no data arrives within
+   * STREAM_IDLE_TIMEOUT_MS, assume the connection is dead and throw so
+   * withRetry can reconnect. This prevents indefinite hangs on stale
+   * SSE connections from OpenAI/Gemini during long-running sessions.
+   * Respects the caller's AbortSignal — clears the idle timer on abort
+   * so the rejection reason is AbortError, not a spurious idle timeout.
+   */
+  async function readWithTimeout(): Promise<ReadableStreamReadResult<Uint8Array>> {
+    return new Promise((resolve, reject) => {
+      const timeoutId = setTimeout(() => {
+        const elapsed = Math.round((Date.now() - lastDataTime) / 1000)
+        reject(new Error(
+          `OpenAI/Gemini SSE stream idle for ${elapsed}s (limit: ${STREAM_IDLE_TIMEOUT_MS / 1000}s). Connection likely dropped.`,
+        ))
+      }, STREAM_IDLE_TIMEOUT_MS)
+
+      // If the caller aborts, clear the timer so the AbortError surfaces
+      // cleanly instead of being masked by a spurious idle timeout.
+      let abortCleanup: (() => void) | undefined
+      if (signal) {
+        abortCleanup = () => {
+          clearTimeout(timeoutId)
+        }
+        signal.addEventListener('abort', abortCleanup, { once: true })
+      }
+
+      reader.read().then(
+        result => {
+          clearTimeout(timeoutId)
+          if (signal && abortCleanup) signal.removeEventListener('abort', abortCleanup)
+          if (result.value) lastDataTime = Date.now()
+          resolve(result)
+        },
+        err => {
+          clearTimeout(timeoutId)
+          if (signal && abortCleanup) signal.removeEventListener('abort', abortCleanup)
+          reject(err)
+        },
+      )
+    })
+  }
 
   const closeActiveContentBlock = async function* () {
     if (!hasEmittedContentStart) return
@@ -688,7 +811,7 @@ async function* openaiStreamToAnthropic(
 
   try {
     while (true) {
-      const { done, value } = await reader.read()
+      const { done, value } = await readWithTimeout()
       if (done) break
 
       buffer += decoder.decode(value, { stream: true })
@@ -1048,13 +1171,13 @@ class OpenAIShimMessages {
         const isResponsesStream = response.url?.includes('/responses')
         return new OpenAIShimStream(
           (request.transport === 'codex_responses' || isResponsesStream)
-            ? codexStreamToAnthropic(response, request.resolvedModel)
-            : openaiStreamToAnthropic(response, request.resolvedModel),
+            ? codexStreamToAnthropic(response, request.resolvedModel, options?.signal)
+            : openaiStreamToAnthropic(response, request.resolvedModel, options?.signal),
         )
       }
 
       if (request.transport === 'codex_responses') {
-        const data = await collectCodexCompletedResponse(response)
+        const data = await collectCodexCompletedResponse(response, options?.signal)
         return convertCodexResponseToAnthropicMessage(
           data,
           request.resolvedModel,
@@ -1117,7 +1240,6 @@ class OpenAIShimMessages {
     const githubEndpointType = getGithubEndpointType(request.baseUrl)
     const isGithubMode = isGithubModelsMode()
     const isGithubWithCodexTransport = isGithubMode && request.transport === 'codex_responses'
-    const isGithubCopilotEndpoint = isGithubMode && githubEndpointType === 'copilot'
 
     if (isGithubWithCodexTransport) {
       const apiKey =
@@ -1147,11 +1269,26 @@ class OpenAIShimMessages {
     }
 
     if (request.transport === 'codex_responses' && !isGithubMode) {
-      const credentials = resolveCodexApiCredentials()
+      const refreshResult = await refreshCodexAccessTokenIfNeeded().catch(
+        async error => {
+          logForDebugging(
+            `[codex] access token refresh failed before request: ${error instanceof Error ? error.message : String(error)}`,
+            { level: 'warn' },
+          )
+          return {
+            refreshed: false,
+            credentials: await readCodexCredentialsAsync(),
+          }
+        },
+      )
+      const credentials = resolveRuntimeCodexCredentials({
+        storedCredentials: refreshResult.credentials,
+      })
       if (!credentials.apiKey) {
+        const oauthHint = isBareMode() ? '' : ', choose Codex OAuth in /provider'
         const authHint = credentials.authPath
-          ? ` or place a Codex auth.json at ${credentials.authPath}`
-          : ''
+          ? `${oauthHint} or place a Codex auth.json at ${credentials.authPath}`
+          : oauthHint
         const safeModel =
           redactSecretValueForDisplay(request.requestedModel, process.env as SecretValueSource) ??
           'the requested model'
@@ -1161,7 +1298,7 @@ class OpenAIShimMessages {
       }
       if (!credentials.accountId) {
         throw new Error(
-          'Codex auth is missing chatgpt_account_id. Re-login with the Codex CLI or set CHATGPT_ACCOUNT_ID/CODEX_ACCOUNT_ID.',
+          'Codex auth is missing chatgpt_account_id. Re-login with Codex OAuth, the Codex CLI, or set CHATGPT_ACCOUNT_ID/CODEX_ACCOUNT_ID.',
         )
       }
 
@@ -1222,18 +1359,20 @@ class OpenAIShimMessages {
 
     const isGithub = isGithubModelsMode()
     const isMistral = isMistralMode()
+    const isLocal = isLocalProviderUrl(request.baseUrl)
 
     const githubEndpointType = getGithubEndpointType(request.baseUrl)
     const isGithubCopilot = isGithub && githubEndpointType === 'copilot'
     const isGithubModels = isGithub && (githubEndpointType === 'models' || githubEndpointType === 'custom')
 
-    if ((isGithub || isMistral) && body.max_completion_tokens !== undefined) {
+    if ((isGithub || isMistral || isLocal) && body.max_completion_tokens !== undefined) {
       body.max_tokens = body.max_completion_tokens
       delete body.max_completion_tokens
     }
 
-    // mistral also doesn't recognize body.store
-    if (isMistral) {
+    // mistral and gemini don't recognize body.store — Gemini returns 400
+    // "Invalid JSON payload received. Unknown name 'store': Cannot find field."
+    if (isMistral || isGeminiMode()) {
       delete body.store
     }
 
@@ -1274,13 +1413,17 @@ class OpenAIShimMessages {
       ...filterAnthropicHeaders(options?.headers),
     }
 
-    const isGemini = isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI)
+    const isGemini = isGeminiMode()
+    const isMiniMax = !!process.env.MINIMAX_API_KEY
     const githubApiKey = isGithub
       ? resolveGithubTokenForModel(request.requestedModel)
       : undefined
     const apiKey =
       this.providerOverride?.apiKey ??
-      (isGithub ? (githubApiKey ?? '') : (process.env.OPENAI_API_KEY ?? ''))
+      (isGithub
+        ? (githubApiKey ?? '')
+        : (process.env.OPENAI_API_KEY ??
+            (isMiniMax ? process.env.MINIMAX_API_KEY : '')))
     // Detect Azure endpoints by hostname (not raw URL) to prevent bypass via
     // path segments like https://evil.com/cognitiveservices.azure.com/
     let isAzure = false
@@ -1344,12 +1487,97 @@ class OpenAIShimMessages {
     }
 
     const maxAttempts = isGithub ? GITHUB_429_MAX_RETRIES : 1
+
+    const throwClassifiedTransportError = (
+      error: unknown,
+      requestUrl: string,
+    ): never => {
+      if (options?.signal?.aborted) {
+        throw error
+      }
+
+      const failure = classifyOpenAINetworkFailure(error, {
+        url: requestUrl,
+      })
+      const redactedUrl = redactUrlForDiagnostics(requestUrl)
+      const safeMessage =
+        redactSecretValueForDisplay(
+          failure.message,
+          process.env as SecretValueSource,
+        ) || 'Request failed'
+
+      logForDebugging(
+        `[OpenAIShim] transport failure category=${failure.category} retryable=${failure.retryable} code=${failure.code ?? 'unknown'} method=POST url=${redactedUrl} model=${request.resolvedModel} message=${safeMessage}`,
+        { level: 'warn' },
+      )
+
+      throw APIError.generate(
+        503,
+        undefined,
+        buildOpenAICompatibilityErrorMessage(
+          `OpenAI API transport error: ${safeMessage}${failure.code ? ` (code=${failure.code})` : ''}`,
+          failure,
+        ),
+        new Headers(),
+      )
+    }
+
+    const throwClassifiedHttpError = (
+      status: number,
+      errorBody: string,
+      parsedBody: object | undefined,
+      responseHeaders: Headers,
+      requestUrl: string,
+      rateHint = '',
+    ): never => {
+      const failure = classifyOpenAIHttpFailure({
+        status,
+        body: errorBody,
+      })
+      const redactedUrl = redactUrlForDiagnostics(requestUrl)
+
+      logForDebugging(
+        `[OpenAIShim] request failed category=${failure.category} retryable=${failure.retryable} status=${status} method=POST url=${redactedUrl} model=${request.resolvedModel}`,
+        { level: 'warn' },
+      )
+
+      throw APIError.generate(
+        status,
+        parsedBody,
+        buildOpenAICompatibilityErrorMessage(
+          `OpenAI API error ${status}: ${errorBody}${rateHint}`,
+          failure,
+        ),
+        responseHeaders,
+      )
+    }
+
     let response: Response | undefined
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      response = await fetch(chatCompletionsUrl, fetchInit)
+      try {
+        response = await fetchWithProxyRetry(chatCompletionsUrl, fetchInit)
+      } catch (error) {
+        const isAbortError =
+          fetchInit.signal?.aborted === true ||
+          (typeof DOMException !== 'undefined' &&
+            error instanceof DOMException &&
+            error.name === 'AbortError') ||
+          (typeof error === 'object' &&
+            error !== null &&
+            'name' in error &&
+            error.name === 'AbortError')
+
+        if (isAbortError) {
+          throw error
+        }
+
+        throwClassifiedTransportError(error, chatCompletionsUrl)
+      }
+
       if (response.ok) {
         return response
       }
+
       if (
         isGithub &&
         response.status === 429 &&
@@ -1419,34 +1647,43 @@ class OpenAIShimMessages {
             }
           }
 
-          const responsesResponse = await fetch(responsesUrl, {
-            method: 'POST',
-            headers,
-            body: JSON.stringify(responsesBody),
-            signal: options?.signal,
-          })
+          let responsesResponse: Response
+          try {
+            responsesResponse = await fetchWithProxyRetry(responsesUrl, {
+              method: 'POST',
+              headers,
+              body: JSON.stringify(responsesBody),
+              signal: options?.signal,
+            })
+          } catch (error) {
+            throwClassifiedTransportError(error, responsesUrl)
+          }
+          
           if (responsesResponse.ok) {
             return responsesResponse
           }
           const responsesErrorBody = await responsesResponse.text().catch(() => 'unknown error')
           let responsesErrorResponse: object | undefined
           try { responsesErrorResponse = JSON.parse(responsesErrorBody) } catch { /* raw text */ }
-          throw APIError.generate(
+          throwClassifiedHttpError(
             responsesResponse.status,
+            responsesErrorBody,
             responsesErrorResponse,
-            `OpenAI API error ${responsesResponse.status}: ${responsesErrorBody}`,
             responsesResponse.headers,
+            responsesUrl,
           )
         }
       }
 
       let errorResponse: object | undefined
       try { errorResponse = JSON.parse(errorBody) } catch { /* raw text */ }
-      throw APIError.generate(
+      throwClassifiedHttpError(
         response.status,
+        errorBody,
         errorResponse,
-        `OpenAI API error ${response.status}: ${errorBody}${rateHint}`,
         response.headers as unknown as Headers,
+        chatCompletionsUrl,
+        rateHint,
       )
     }
 

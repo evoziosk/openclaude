@@ -1,9 +1,22 @@
 import figures from 'figures'
 import * as React from 'react'
+import { DEFAULT_CODEX_BASE_URL } from '../services/api/providerConfig.js'
 import { Box, Text } from '../ink.js'
 import { useKeybinding } from '../keybindings/useKeybinding.js'
+import { useSetAppState } from '../state/AppState.js'
 import type { ProviderProfile } from '../utils/config.js'
-import { hasLocalOllama, listOllamaModels } from '../utils/providerDiscovery.js'
+import {
+  clearCodexCredentials,
+  readCodexCredentialsAsync,
+} from '../utils/codexCredentials.js'
+import { isBareMode, isEnvTruthy } from '../utils/envUtils.js'
+import { getPrimaryModel, hasMultipleModels, parseModelList } from '../utils/providerModels.js'
+import {
+  applySavedProfileToCurrentSession,
+  buildCodexOAuthProfileEnv,
+  clearPersistedCodexOAuthProfile,
+  createProfileFile,
+} from '../utils/providerProfile.js'
 import {
   addProviderProfile,
   applyActiveProviderProfileFromConfig,
@@ -17,25 +30,29 @@ import {
   updateProviderProfile,
 } from '../utils/providerProfiles.js'
 import {
-  rankOllamaModels,
-  recommendOllamaModel,
-} from '../utils/providerRecommendation.js'
-import {
   clearGithubModelsToken,
   GITHUB_MODELS_HYDRATED_ENV_MARKER,
   hydrateGithubModelsTokenFromSecureStorage,
   readGithubModelsToken,
   readGithubModelsTokenAsync,
 } from '../utils/githubModelsCredentials.js'
-import { isEnvTruthy } from '../utils/envUtils.js'
+import {
+  hasLocalOllama,
+  listOllamaModels,
+} from '../utils/providerDiscovery.js'
+import {
+  rankOllamaModels,
+  recommendOllamaModel,
+} from '../utils/providerRecommendation.js'
 import { updateSettingsForSource } from '../utils/settings/settings.js'
 import {
-  runCodexOauthLogin,
-  type RunCodexOauthLoginOptions,
-} from '../utils/codexOauth.js'
-import { type OptionWithDescription, Select } from './CustomSelect/index.js'
+  type OptionWithDescription,
+  Select,
+} from './CustomSelect/index.js'
 import { Pane } from './design-system/Pane.js'
 import TextInput from './TextInput.js'
+import { useCodexOAuthFlow } from './useCodexOAuthFlow.js'
+import { useSetAppState } from '../state/AppState.js'
 
 export type ProviderManagerResult = {
   action: 'saved' | 'cancelled'
@@ -46,15 +63,13 @@ export type ProviderManagerResult = {
 type Props = {
   mode: 'first-run' | 'manage'
   onDone: (result?: ProviderManagerResult) => void
-  runCodexOauthLoginFn?: (
-    options?: RunCodexOauthLoginOptions,
-  ) => Promise<{ ok: true } | { ok: false; message: string }>
 }
 
 type Screen =
   | 'menu'
   | 'select-preset'
   | 'select-ollama-model'
+  | 'codex-oauth'
   | 'form'
   | 'select-active'
   | 'select-edit'
@@ -96,8 +111,8 @@ const FORM_STEPS: Array<{
   {
     key: 'model',
     label: 'Default model',
-    placeholder: 'e.g. llama3.1:8b',
-    helpText: 'Model name to use when this provider is active.',
+    placeholder: 'e.g. llama3.1:8b or glm-4.7, glm-4.7-flash',
+    helpText: 'Model name(s) to use. Separate multiple with commas; first is default.',
   },
   {
     key: 'apiKey',
@@ -112,6 +127,8 @@ const GITHUB_PROVIDER_ID = '__github_models__'
 const GITHUB_PROVIDER_LABEL = 'GitHub Models'
 const GITHUB_PROVIDER_DEFAULT_MODEL = 'github:copilot'
 const GITHUB_PROVIDER_DEFAULT_BASE_URL = 'https://models.github.ai/inference'
+const CODEX_OAUTH_PROVIDER_NAME = 'Codex OAuth'
+const CODEX_OAUTH_PROVIDER_MODEL = 'codexplan'
 
 type GithubCredentialSource = 'stored' | 'env' | 'none'
 
@@ -139,7 +156,12 @@ function profileSummary(profile: ProviderProfile, isActive: boolean): string {
   const keyInfo = profile.apiKey ? 'key set' : 'no key'
   const providerKind =
     profile.provider === 'anthropic' ? 'anthropic' : 'openai-compatible'
-  return `${providerKind} · ${profile.baseUrl} · ${profile.model} · ${keyInfo}${activeSuffix}`
+  const models = parseModelList(profile.model)
+  const modelDisplay =
+    models.length <= 3
+      ? models.join(', ')
+      : `${models[0]}, ${models[1]} + ${models.length - 2} more`
+  return `${providerKind} · ${profile.baseUrl} · ${modelDisplay} · ${keyInfo}${activeSuffix}`
 }
 
 function getGithubCredentialSourceFromEnv(
@@ -200,11 +222,113 @@ function getGithubProviderSummary(
   return `github-models · ${GITHUB_PROVIDER_DEFAULT_BASE_URL} · ${getGithubProviderModel(processEnv)} · ${credentialSummary}${activeSuffix}`
 }
 
-export function ProviderManager({
-  mode,
-  onDone,
-  runCodexOauthLoginFn,
-}: Props): React.ReactNode {
+function findCodexOAuthProfile(
+  profiles: ProviderProfile[],
+  profileId?: string,
+): ProviderProfile | undefined {
+  if (!profileId) {
+    return undefined
+  }
+
+  return profiles.find(profile => profile.id === profileId)
+}
+
+function isCodexOAuthProfile(
+  profile: ProviderProfile | null | undefined,
+  profileId?: string,
+): boolean {
+  return Boolean(profile && profileId && profile.id === profileId)
+}
+
+function CodexOAuthSetup({
+  onBack,
+  onConfigured,
+}: {
+  onBack: () => void
+  onConfigured: (tokens: {
+    accessToken: string
+    refreshToken: string
+    accountId?: string
+    idToken?: string
+    apiKey?: string
+  }, persistCredentials: (options?: { profileId?: string }) => void) => void | Promise<void>
+}): React.ReactNode {
+  const handleAuthenticated = React.useCallback(async (tokens: {
+    accessToken: string
+    refreshToken: string
+    accountId?: string
+    idToken?: string
+    apiKey?: string
+  }, persistCredentials: (options?: { profileId?: string }) => void) => {
+    await onConfigured(tokens, persistCredentials)
+  }, [onConfigured])
+  useKeybinding('confirm:no', onBack, [onBack])
+
+  const status = useCodexOAuthFlow({
+    onAuthenticated: handleAuthenticated,
+  })
+
+  if (status.state === 'error') {
+    return (
+      <Box flexDirection="column" gap={1}>
+        <Text color="error" bold>
+          Codex OAuth failed
+        </Text>
+        <Text>{status.message}</Text>
+        <Text dimColor>Press Enter or Esc to go back.</Text>
+        <Select
+          options={[
+            {
+              value: 'back',
+              label: 'Back',
+              description: 'Return to provider presets',
+            },
+          ]}
+          onChange={onBack}
+          onCancel={onBack}
+          visibleOptionCount={1}
+        />
+      </Box>
+    )
+  }
+
+  return (
+    <Box flexDirection="column" gap={1}>
+      <Text color="remember" bold>
+        Codex OAuth
+      </Text>
+      <Text>
+        Sign in with your ChatGPT account in the browser. OpenClaude will store
+        the resulting Codex credentials securely and switch this session to the
+        new Codex login when setup completes.
+      </Text>
+      {status.state === 'starting' ? (
+        <Text dimColor>Starting local callback and preparing your browser...</Text>
+      ) : status.browserOpened === false ? (
+        <>
+          <Text color="warning">
+            Browser did not open automatically. Visit this URL to continue:
+          </Text>
+          <Text>{status.authUrl}</Text>
+        </>
+      ) : status.browserOpened === true ? (
+        <>
+          <Text dimColor>
+            Browser opened. Finish the ChatGPT sign-in there and this setup will
+            complete automatically.
+          </Text>
+          <Text>{status.authUrl}</Text>
+        </>
+      ) : (
+        <Text dimColor>Opening your browser...</Text>
+      )}
+      <Text dimColor>Press Esc to cancel and go back.</Text>
+    </Box>
+  )
+}
+
+export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
+  const setAppState = useSetAppState()
   const initialGithubCredentialSource = getGithubCredentialSourceFromEnv()
   const initialIsGithubActive = isEnvTruthy(process.env.CLAUDE_CODE_USE_GITHUB)
   const initialHasGithubCredential = initialGithubCredentialSource !== 'none'
@@ -223,6 +347,7 @@ export function ProviderManager({
   const [isGithubCredentialSourceResolved, setIsGithubCredentialSourceResolved] =
     React.useState(() => initialHasGithubCredential || initialIsGithubActive)
   const githubRefreshEpochRef = React.useRef(0)
+  const codexRefreshEpochRef = React.useRef(0)
   const [screen, setScreen] = React.useState<Screen>(
     mode === 'first-run' ? 'select-preset' : 'menu',
   )
@@ -237,10 +362,15 @@ export function ProviderManager({
   const [cursorOffset, setCursorOffset] = React.useState(0)
   const [statusMessage, setStatusMessage] = React.useState<string | undefined>()
   const [errorMessage, setErrorMessage] = React.useState<string | undefined>()
+  const [menuFocusValue, setMenuFocusValue] = React.useState<string | undefined>()
+  const [hasStoredCodexOAuthCredentials, setHasStoredCodexOAuthCredentials] =
+    React.useState(false)
+  const [storedCodexOAuthProfileId, setStoredCodexOAuthProfileId] =
+    React.useState<string | undefined>()
   const [ollamaSelection, setOllamaSelection] = React.useState<OllamaSelectionState>({
     state: 'idle',
   })
-  const [codexOauthStatusMessage, setCodexOauthStatusMessage] = React.useState<string | undefined>()
+
   const currentStep = FORM_STEPS[formStepIndex] ?? FORM_STEPS[0]
   const currentStepKey = currentStep.key
   const currentValue = draft[currentStepKey]
@@ -274,140 +404,42 @@ export function ProviderManager({
     })()
   }, [])
 
+  const refreshCodexOAuthCredentialState = React.useCallback((): void => {
+    if (isBareMode()) {
+      codexRefreshEpochRef.current += 1
+      setHasStoredCodexOAuthCredentials(false)
+      setStoredCodexOAuthProfileId(undefined)
+      return
+    }
+
+    const refreshEpoch = ++codexRefreshEpochRef.current
+    void (async () => {
+      const credentials = await readCodexCredentialsAsync()
+      if (refreshEpoch !== codexRefreshEpochRef.current) {
+        return
+      }
+
+      setHasStoredCodexOAuthCredentials(
+        Boolean(
+          credentials?.apiKey ||
+            credentials?.accessToken ||
+            credentials?.refreshToken ||
+            credentials?.idToken,
+        ),
+      )
+      setStoredCodexOAuthProfileId(credentials?.profileId)
+    })()
+  }, [])
+
   React.useEffect(() => {
     refreshGithubProviderState()
+    refreshCodexOAuthCredentialState()
 
     return () => {
       githubRefreshEpochRef.current += 1
+      codexRefreshEpochRef.current += 1
     }
-  }, [refreshGithubProviderState])
-
-  function refreshProfiles(): void {
-    const nextProfiles = getProviderProfiles()
-    setProfiles(nextProfiles)
-    setActiveProfileId(getActiveProviderProfile()?.id)
-    refreshGithubProviderState()
-  }
-
-  function clearStartupProviderOverrideFromUserSettings(): string | null {
-    const { error } = updateSettingsForSource('userSettings', {
-      env: {
-        CLAUDE_CODE_USE_OPENAI: undefined as any,
-        CLAUDE_CODE_USE_GEMINI: undefined as any,
-        CLAUDE_CODE_USE_MISTRAL: undefined as any,
-        CLAUDE_CODE_USE_GITHUB: undefined as any,
-        CLAUDE_CODE_USE_BEDROCK: undefined as any,
-        CLAUDE_CODE_USE_VERTEX: undefined as any,
-        CLAUDE_CODE_USE_FOUNDRY: undefined as any,
-      },
-    })
-    return error ? error.message : null
-  }
-
-  function closeWithCancelled(message: string): void {
-    onDone({ action: 'cancelled', message })
-  }
-
-  function activateGithubProvider(): string | null {
-    const { error } = updateSettingsForSource('userSettings', {
-      env: {
-        CLAUDE_CODE_USE_GITHUB: '1',
-        OPENAI_MODEL: GITHUB_PROVIDER_DEFAULT_MODEL,
-        OPENAI_API_KEY: undefined as any,
-        OPENAI_ORG: undefined as any,
-        OPENAI_PROJECT: undefined as any,
-        OPENAI_ORGANIZATION: undefined as any,
-        OPENAI_BASE_URL: undefined as any,
-        OPENAI_API_BASE: undefined as any,
-        CLAUDE_CODE_USE_OPENAI: undefined as any,
-        CLAUDE_CODE_USE_GEMINI: undefined as any,
-        CLAUDE_CODE_USE_MISTRAL: undefined as any,
-        CLAUDE_CODE_USE_BEDROCK: undefined as any,
-        CLAUDE_CODE_USE_VERTEX: undefined as any,
-        CLAUDE_CODE_USE_FOUNDRY: undefined as any,
-        MISTRAL_BASE_URL: undefined as any,
-        MISTRAL_MODEL: undefined as any,
-        MISTRAL_API_KEY: undefined as any,
-        CODEX_API_KEY: undefined as any,
-        CHATGPT_ACCOUNT_ID: undefined as any,
-        CODEX_ACCOUNT_ID: undefined as any,
-      },
-    })
-    if (error) {
-      return error.message
-    }
-
-    process.env.CLAUDE_CODE_USE_GITHUB = '1'
-    process.env.OPENAI_MODEL = GITHUB_PROVIDER_DEFAULT_MODEL
-    delete process.env.OPENAI_API_KEY
-    delete process.env.OPENAI_ORG
-    delete process.env.OPENAI_PROJECT
-    delete process.env.OPENAI_ORGANIZATION
-    delete process.env.OPENAI_BASE_URL
-    delete process.env.OPENAI_API_BASE
-    delete process.env.CLAUDE_CODE_USE_OPENAI
-    delete process.env.CLAUDE_CODE_USE_GEMINI
-    delete process.env.CLAUDE_CODE_USE_MISTRAL
-    delete process.env.CLAUDE_CODE_USE_BEDROCK
-    delete process.env.CLAUDE_CODE_USE_VERTEX
-    delete process.env.CLAUDE_CODE_USE_FOUNDRY
-    delete process.env.MISTRAL_BASE_URL
-    delete process.env.MISTRAL_MODEL
-    delete process.env.MISTRAL_API_KEY
-    delete process.env.CODEX_API_KEY
-    delete process.env.CHATGPT_ACCOUNT_ID
-    delete process.env.CODEX_ACCOUNT_ID
-    delete process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED
-    delete process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID
-    delete process.env[GITHUB_MODELS_HYDRATED_ENV_MARKER]
-
-    hydrateGithubModelsTokenFromSecureStorage()
-    return null
-  }
-
-  function deleteGithubProvider(): string | null {
-    const storedTokenBeforeClear = readGithubModelsToken()?.trim()
-    const cleared = clearGithubModelsToken()
-    if (!cleared.success) {
-      return cleared.warning ?? 'Could not clear GitHub credentials.'
-    }
-
-    const { error } = updateSettingsForSource('userSettings', {
-      env: {
-        CLAUDE_CODE_USE_GITHUB: undefined as any,
-        OPENAI_MODEL: undefined as any,
-        OPENAI_BASE_URL: undefined as any,
-        OPENAI_API_BASE: undefined as any,
-      },
-    })
-    if (error) {
-      return error.message
-    }
-
-    const hydratedTokenInSession = process.env.GITHUB_TOKEN?.trim()
-    if (
-      process.env[GITHUB_MODELS_HYDRATED_ENV_MARKER] === '1' &&
-      hydratedTokenInSession &&
-      (!storedTokenBeforeClear || hydratedTokenInSession === storedTokenBeforeClear)
-    ) {
-      delete process.env.GITHUB_TOKEN
-    }
-
-    delete process.env.CLAUDE_CODE_USE_GITHUB
-    delete process.env[GITHUB_MODELS_HYDRATED_ENV_MARKER]
-    delete process.env.OPENAI_MODEL
-    delete process.env.OPENAI_API_KEY
-    delete process.env.OPENAI_ORG
-    delete process.env.OPENAI_PROJECT
-    delete process.env.OPENAI_ORGANIZATION
-    delete process.env.OPENAI_BASE_URL
-    delete process.env.OPENAI_API_BASE
-
-    // Restore active provider profile immediately when one exists.
-    applyActiveProviderProfileFromConfig()
-
-    return null
-  }
+  }, [refreshCodexOAuthCredentialState, refreshGithubProviderState])
 
   React.useEffect(() => {
     if (screen !== 'select-ollama-model') {
@@ -462,62 +494,266 @@ export function ProviderManager({
     }
   }, [draft.baseUrl, screen])
 
-  async function startCodexPresetSetup(): Promise<void> {
-    setStatusMessage(undefined)
-    setErrorMessage(undefined)
-    setCodexOauthStatusMessage('Starting Codex OAuth login...')
+  function refreshProfiles(): void {
+    const nextProfiles = getProviderProfiles()
+    setProfiles(nextProfiles)
+    setActiveProfileId(getActiveProviderProfile()?.id)
+    refreshGithubProviderState()
+    refreshCodexOAuthCredentialState()
+  }
 
-    const loginResult = await (runCodexOauthLoginFn ?? runCodexOauthLogin)({
-      forceLogin: true,
-    })
-    if (!loginResult.ok) {
-      setCodexOauthStatusMessage(undefined)
-      setErrorMessage(loginResult.message)
-      return
-    }
-
-    setCodexOauthStatusMessage(undefined)
-    const saved = addProviderProfile(
-      {
-        provider: 'openai',
-        name: 'Codex',
-        baseUrl: 'https://chatgpt.com/backend-api/codex',
-        model: 'codexplan',
+  function clearStartupProviderOverrideFromUserSettings(): string | null {
+    const { error } = updateSettingsForSource('userSettings', {
+      env: {
+        CLAUDE_CODE_USE_OPENAI: undefined as any,
+        CLAUDE_CODE_USE_GEMINI: undefined as any,
+        CLAUDE_CODE_USE_GITHUB: undefined as any,
+        CLAUDE_CODE_USE_BEDROCK: undefined as any,
+        CLAUDE_CODE_USE_VERTEX: undefined as any,
+        CLAUDE_CODE_USE_FOUNDRY: undefined as any,
       },
-      { makeActive: true },
-    )
+    })
+    return error ? error.message : null
+  }
 
-    if (!saved) {
-      setErrorMessage('Could not save Codex provider profile after login.')
-      return
+  function buildCodexOAuthActivationMessage(options: {
+    prefix: string
+    activationWarning: string | null
+    warnings: string[]
+  }): string {
+    if (options.activationWarning) {
+      return `${options.prefix}. Saved for next startup. Warning: ${options.warnings.join('; ')}.`
     }
 
-    const settingsOverrideError = clearStartupProviderOverrideFromUserSettings()
+    if (options.warnings.length > 0) {
+      return `${options.prefix}. OpenClaude switched to it for this session with warnings: ${options.warnings.join('; ')}.`
+    }
 
-    refreshProfiles()
-    const successMessage = settingsOverrideError
-      ? `Added provider: ${saved.name} (now active). Warning: could not clear startup provider override (${settingsOverrideError}).`
-      : `Added provider: ${saved.name} (now active)`
-    setStatusMessage(successMessage)
+    return `${options.prefix}. OpenClaude switched to it for this session.`
+  }
 
-    if (mode === 'first-run') {
-      onDone({
-        action: 'saved',
-        activeProfileId: saved.id,
-        message: `Provider configured: ${saved.name}`,
+  async function activateCodexOAuthSession(tokens?: {
+    accessToken: string
+    refreshToken?: string
+    accountId?: string
+    idToken?: string
+  }): Promise<string | null> {
+    const oauthEnv = buildCodexOAuthProfileEnv({
+      accessToken: tokens?.accessToken ?? '',
+      accountId: tokens?.accountId,
+      idToken: tokens?.idToken,
+    })
+
+    if (oauthEnv) {
+      return applySavedProfileToCurrentSession({
+        profileFile: createProfileFile('codex', oauthEnv),
       })
-      return
     }
 
+    const storedCredentials = await readCodexCredentialsAsync()
+    if (!storedCredentials) {
+      return 'stored Codex OAuth credentials could not be loaded'
+    }
+
+    const storedEnv = buildCodexOAuthProfileEnv({
+      accessToken: storedCredentials.accessToken,
+      accountId: storedCredentials.accountId,
+      idToken: storedCredentials.idToken,
+    })
+    if (!storedEnv) {
+      return 'stored Codex OAuth credentials are missing a ChatGPT account id'
+    }
+
+    return applySavedProfileToCurrentSession({
+      profileFile: createProfileFile('codex', storedEnv),
+    })
+  }
+
+  async function activateSelectedProvider(profileId: string): Promise<void> {
+    let providerLabel = 'provider'
+
+    try {
+      if (profileId === GITHUB_PROVIDER_ID) {
+        providerLabel = GITHUB_PROVIDER_LABEL
+        const githubError = activateGithubProvider()
+        if (githubError) {
+          setErrorMessage(`Could not activate GitHub provider: ${githubError}`)
+          returnToMenu()
+          return
+        }
+
+        setAppState(prev => ({
+          ...prev,
+          mainLoopModel: GITHUB_PROVIDER_DEFAULT_MODEL,
+          mainLoopModelForSession: null,
+        }))
+        refreshProfiles()
+        setAppState(prev => ({
+          ...prev,
+          mainLoopModel: GITHUB_PROVIDER_DEFAULT_MODEL,
+        }))
+        setStatusMessage(`Active provider: ${GITHUB_PROVIDER_LABEL}`)
+        returnToMenu()
+        return
+      }
+
+      const active = setActiveProviderProfile(profileId)
+      if (!active) {
+        setErrorMessage('Could not change active provider.')
+        returnToMenu()
+        return
+      }
+
+      // Update the session model to the new provider's first model.
+      // persistActiveProviderProfileModel (called by onChangeAppState) will
+      // not overwrite the multi-model list because it checks if the model
+      // is already in the profile's comma-separated model list.
+      const newModel = getPrimaryModel(active.model)
+      setAppState(prev => ({
+        ...prev,
+        mainLoopModel: newModel,
+      }))
+
+      providerLabel = active.name
+      setAppState(prev => ({
+        ...prev,
+        mainLoopModel: active.model,
+        mainLoopModelForSession: null,
+      }))
+      const settingsOverrideError =
+        clearStartupProviderOverrideFromUserSettings()
+      const isActiveCodexOAuth = isCodexOAuthProfile(
+        active,
+        storedCodexOAuthProfileId,
+      )
+      const activationWarning = isActiveCodexOAuth
+        ? await activateCodexOAuthSession()
+        : null
+
+      refreshProfiles()
+      setStatusMessage(
+        isActiveCodexOAuth
+          ? buildCodexOAuthActivationMessage({
+              prefix: `Active provider: ${active.name}`,
+              activationWarning,
+              warnings: [
+                activationWarning,
+                settingsOverrideError
+                  ? `could not clear startup provider override (${settingsOverrideError})`
+                  : null,
+              ].filter((warning): warning is string => Boolean(warning)),
+            })
+          : settingsOverrideError
+            ? `Active provider: ${active.name}. Warning: could not clear startup provider override (${settingsOverrideError}).`
+            : `Active provider: ${active.name}`,
+      )
+      returnToMenu()
+    } catch (error) {
+      refreshProfiles()
+      setStatusMessage(undefined)
+      const detail = error instanceof Error ? error.message : String(error)
+      setErrorMessage(`Could not finish activating ${providerLabel}: ${detail}`)
+      returnToMenu()
+    }
+  }
+
+  function returnToMenu(): void {
+    setMenuFocusValue('done')
     setScreen('menu')
   }
 
-  function startCreateFromPreset(preset: ProviderPreset): void {
-    if (preset === 'codex') {
-      void startCodexPresetSetup()
-      return
+  function closeWithCancelled(message: string): void {
+    onDone({ action: 'cancelled', message })
+  }
+
+  function activateGithubProvider(): string | null {
+    const { error } = updateSettingsForSource('userSettings', {
+      env: {
+        CLAUDE_CODE_USE_GITHUB: '1',
+        OPENAI_MODEL: GITHUB_PROVIDER_DEFAULT_MODEL,
+        OPENAI_API_KEY: undefined as any,
+        OPENAI_ORG: undefined as any,
+        OPENAI_PROJECT: undefined as any,
+        OPENAI_ORGANIZATION: undefined as any,
+        OPENAI_BASE_URL: undefined as any,
+        OPENAI_API_BASE: undefined as any,
+        CLAUDE_CODE_USE_OPENAI: undefined as any,
+        CLAUDE_CODE_USE_GEMINI: undefined as any,
+        CLAUDE_CODE_USE_BEDROCK: undefined as any,
+        CLAUDE_CODE_USE_VERTEX: undefined as any,
+        CLAUDE_CODE_USE_FOUNDRY: undefined as any,
+      },
+    })
+    if (error) {
+      return error.message
     }
 
+    process.env.CLAUDE_CODE_USE_GITHUB = '1'
+    process.env.OPENAI_MODEL = GITHUB_PROVIDER_DEFAULT_MODEL
+    delete process.env.OPENAI_API_KEY
+    delete process.env.OPENAI_ORG
+    delete process.env.OPENAI_PROJECT
+    delete process.env.OPENAI_ORGANIZATION
+    delete process.env.OPENAI_BASE_URL
+    delete process.env.OPENAI_API_BASE
+    delete process.env.CLAUDE_CODE_USE_OPENAI
+    delete process.env.CLAUDE_CODE_USE_GEMINI
+    delete process.env.CLAUDE_CODE_USE_BEDROCK
+    delete process.env.CLAUDE_CODE_USE_VERTEX
+    delete process.env.CLAUDE_CODE_USE_FOUNDRY
+    delete process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED
+    delete process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID
+    delete process.env[GITHUB_MODELS_HYDRATED_ENV_MARKER]
+
+    hydrateGithubModelsTokenFromSecureStorage()
+    return null
+  }
+
+  function deleteGithubProvider(): string | null {
+    const storedTokenBeforeClear = readGithubModelsToken()?.trim()
+    const cleared = clearGithubModelsToken()
+    if (!cleared.success) {
+      return cleared.warning ?? 'Could not clear GitHub credentials.'
+    }
+
+    const { error } = updateSettingsForSource('userSettings', {
+      env: {
+        CLAUDE_CODE_USE_GITHUB: undefined as any,
+        OPENAI_MODEL: undefined as any,
+        OPENAI_BASE_URL: undefined as any,
+        OPENAI_API_BASE: undefined as any,
+      },
+    })
+    if (error) {
+      return error.message
+    }
+
+    const hydratedTokenInSession = process.env.GITHUB_TOKEN?.trim()
+    if (
+      process.env[GITHUB_MODELS_HYDRATED_ENV_MARKER] === '1' &&
+      hydratedTokenInSession &&
+      (!storedTokenBeforeClear || hydratedTokenInSession === storedTokenBeforeClear)
+    ) {
+      delete process.env.GITHUB_TOKEN
+    }
+
+    delete process.env.CLAUDE_CODE_USE_GITHUB
+    delete process.env[GITHUB_MODELS_HYDRATED_ENV_MARKER]
+    delete process.env.OPENAI_MODEL
+    delete process.env.OPENAI_API_KEY
+    delete process.env.OPENAI_ORG
+    delete process.env.OPENAI_PROJECT
+    delete process.env.OPENAI_ORGANIZATION
+    delete process.env.OPENAI_BASE_URL
+    delete process.env.OPENAI_API_BASE
+
+    // Restore active provider profile immediately when one exists.
+    applyActiveProviderProfileFromConfig()
+
+    return null
+  }
+
+  function startCreateFromPreset(preset: ProviderPreset): void {
     const defaults = getProviderPresetDefaults(preset)
     const nextDraft = {
       name: defaults.name,
@@ -576,6 +812,13 @@ export function ProviderManager({
     }
 
     const isActiveSavedProfile = getActiveProviderProfile()?.id === saved.id
+    if (isActiveSavedProfile) {
+      setAppState(prev => ({
+        ...prev,
+        mainLoopModel: saved.model,
+        mainLoopModelForSession: null,
+      }))
+    }
     const settingsOverrideError = isActiveSavedProfile
       ? clearStartupProviderOverrideFromUserSettings()
       : null
@@ -603,7 +846,7 @@ export function ProviderManager({
     setEditingProfileId(null)
     setFormStepIndex(0)
     setErrorMessage(undefined)
-    setScreen('menu')
+    returnToMenu()
   }
 
   function renderOllamaSelection(): React.ReactNode {
@@ -638,7 +881,7 @@ export function ProviderManager({
                 description: 'Choose another provider preset',
               },
             ]}
-            onChange={value => {
+            onChange={(value: string) => {
               if (value === 'manual') {
                 setFormStepIndex(0)
                 setCursorOffset(draft.name.length)
@@ -669,7 +912,7 @@ export function ProviderManager({
           defaultFocusValue={ollamaSelection.defaultValue}
           inlineDescriptions
           visibleOptionCount={Math.min(8, ollamaSelection.options.length)}
-          onChange={value => {
+          onChange={(value: string) => {
             const nextDraft = {
               ...draft,
               model: value,
@@ -726,7 +969,7 @@ export function ProviderManager({
       return
     }
 
-    setScreen('menu')
+    returnToMenu()
   }
 
   useKeybinding('confirm:no', handleBackFromForm, {
@@ -735,6 +978,7 @@ export function ProviderManager({
   })
 
   function renderPresetSelection(): React.ReactNode {
+    const canUseCodexOAuth = !isBareMode()
     const options = [
       {
         value: 'anthropic',
@@ -751,11 +995,16 @@ export function ProviderManager({
         label: 'OpenAI',
         description: 'OpenAI API with API key',
       },
-      {
-        value: 'codex',
-        label: 'Codex',
-        description: 'OpenAI OAuth via codex login (no API key required)',
-      },
+      ...(canUseCodexOAuth
+        ? [
+            {
+              value: 'codex-oauth',
+              label: 'Codex OAuth',
+              description:
+                'Sign in with ChatGPT in your browser and store Codex credentials securely',
+            },
+          ]
+        : []),
       {
         value: 'moonshotai',
         label: 'Moonshot AI',
@@ -802,9 +1051,29 @@ export function ProviderManager({
         description: 'Local LM Studio endpoint',
       },
       {
+        value: 'dashscope-cn',
+        label: 'Alibaba Coding Plan (China)',
+        description: 'Alibaba DashScope China endpoint',
+      },
+      {
+        value: 'dashscope-intl',
+        label: 'Alibaba Coding Plan',
+        description: 'Alibaba DashScope International endpoint',
+      },
+      {
         value: 'custom',
         label: 'Custom',
         description: 'Any OpenAI-compatible provider',
+      },
+      {
+        value: 'nvidia-nim',
+        label: 'NVIDIA NIM',
+        description: 'NVIDIA NIM endpoint',
+      },
+      {
+        value: 'minimax',
+        label: 'MiniMax',
+        description: 'MiniMax API endpoint',
       },
       ...(mode === 'first-run'
         ? [
@@ -825,15 +1094,15 @@ export function ProviderManager({
         <Text dimColor>
           Pick a preset, then confirm base URL, model, and API key.
         </Text>
-        {codexOauthStatusMessage && (
-          <Text dimColor>{codexOauthStatusMessage}</Text>
-        )}
-        {errorMessage && <Text color="error">{errorMessage}</Text>}
         <Select
           options={options}
-          onChange={value => {
+          onChange={(value: string) => {
             if (value === 'skip') {
               closeWithCancelled('Provider setup skipped')
+              return
+            }
+            if (value === 'codex-oauth') {
+              setScreen('codex-oauth')
               return
             }
             startCreateFromPreset(value as ProviderPreset)
@@ -843,9 +1112,9 @@ export function ProviderManager({
               closeWithCancelled('Provider setup skipped')
               return
             }
-            setScreen('menu')
+            returnToMenu()
           }}
-          visibleOptionCount={Math.min(12, options.length)}
+          visibleOptionCount={Math.min(13, options.length)}
         />
       </Box>
     )
@@ -922,6 +1191,15 @@ export function ProviderManager({
         description: 'Remove a provider profile',
         disabled: !hasSelectableProviders,
       },
+      ...(hasStoredCodexOAuthCredentials
+        ? [
+            {
+              value: 'logout-codex-oauth',
+              label: 'Log out Codex OAuth',
+              description: 'Clear securely stored Codex OAuth credentials',
+            },
+          ]
+        : []),
       {
         value: 'done',
         label: 'Done',
@@ -937,7 +1215,6 @@ export function ProviderManager({
         <Text dimColor>
           Active profile controls base URL, model, and API key used by this session.
         </Text>
-        {codexOauthStatusMessage && <Text dimColor>{codexOauthStatusMessage}</Text>}
         {statusMessage && <Text>{statusMessage}</Text>}
         <Box flexDirection="column">
           {profiles.length === 0 && !githubProviderAvailable ? (
@@ -950,11 +1227,7 @@ export function ProviderManager({
             <>
               {profiles.map(profile => (
                 <Text key={profile.id} dimColor>
-                  - {profile.name}:{' '}
-                  {profileSummary(
-                    profile,
-                    profile.id === activeProfileId && !isGithubActive,
-                  )}
+                  - {profile.name}: {profileSummary(profile, profile.id === activeProfileId)}
                 </Text>
               ))}
               {githubProviderAvailable ? (
@@ -971,7 +1244,7 @@ export function ProviderManager({
         </Box>
         <Select
           options={options}
-          onChange={value => {
+          onChange={(value: string) => {
             setErrorMessage(undefined)
             switch (value) {
               case 'add':
@@ -992,12 +1265,54 @@ export function ProviderManager({
                   setScreen('select-delete')
                 }
                 break
+              case 'logout-codex-oauth': {
+                const cleared = clearCodexCredentials()
+                if (!cleared.success) {
+                  setErrorMessage(
+                    cleared.warning ??
+                      'Could not clear Codex OAuth credentials.',
+                  )
+                  break
+                }
+
+                setHasStoredCodexOAuthCredentials(false)
+                setStoredCodexOAuthProfileId(undefined)
+                const codexProfile = findCodexOAuthProfile(
+                  getProviderProfiles(),
+                  storedCodexOAuthProfileId,
+                )
+                let settingsOverrideError: string | null = null
+                if (codexProfile) {
+                  const result = deleteProviderProfile(codexProfile.id)
+                  if (!result.removed) {
+                    setErrorMessage(
+                      'Codex OAuth credentials were cleared, but the Codex profile could not be removed.',
+                    )
+                    refreshProfiles()
+                    break
+                  }
+
+                  clearPersistedCodexOAuthProfile()
+                  settingsOverrideError = result.activeProfileId
+                    ? clearStartupProviderOverrideFromUserSettings()
+                    : null
+                }
+
+                refreshProfiles()
+                setStatusMessage(
+                  settingsOverrideError
+                    ? `Codex OAuth logged out. Warning: could not clear startup provider override (${settingsOverrideError}).`
+                    : 'Codex OAuth logged out.',
+                )
+                break
+              }
               default:
                 closeWithCancelled('Provider manager closed')
                 break
             }
           }}
           onCancel={() => closeWithCancelled('Provider manager closed')}
+          defaultFocusValue={menuFocusValue}
           visibleOptionCount={options.length}
         />
       </Box>
@@ -1014,7 +1329,7 @@ export function ProviderManager({
     const selectOptions = profiles.map(profile => ({
       value: profile.id,
       label:
-        profile.id === activeProfileId && !isGithubActive
+        profile.id === activeProfileId
           ? `${profile.name} (active)`
           : profile.name,
       description: `${profile.provider === 'anthropic' ? 'anthropic' : 'openai-compatible'} · ${profile.baseUrl} · ${profile.model}`,
@@ -1045,8 +1360,8 @@ export function ProviderManager({
                 description: 'Return to provider manager',
               },
             ]}
-            onChange={() => setScreen('menu')}
-            onCancel={() => setScreen('menu')}
+            onChange={() => returnToMenu()}
+            onCancel={() => returnToMenu()}
             visibleOptionCount={1}
           />
         </Box>
@@ -1061,7 +1376,7 @@ export function ProviderManager({
         <Select
           options={selectOptions}
           onChange={onSelect}
-          onCancel={() => setScreen('menu')}
+          onCancel={() => returnToMenu()}
           visibleOptionCount={Math.min(10, Math.max(2, selectOptions.length))}
         />
       </Box>
@@ -1070,51 +1385,100 @@ export function ProviderManager({
 
   let content: React.ReactNode
 
-    switch (screen) {
-      case 'select-preset':
-        content = renderPresetSelection()
-        break
-      case 'select-ollama-model':
-        content = renderOllamaSelection()
-        break
-      case 'form':
-        content = renderForm()
-        break
+  switch (screen) {
+    case 'select-preset':
+      content = renderPresetSelection()
+      break
+    case 'select-ollama-model':
+      content = renderOllamaSelection()
+      break
+    case 'codex-oauth':
+      content = (
+        <CodexOAuthSetup
+          onBack={() => setScreen('select-preset')}
+          onConfigured={async (tokens, persistCredentials) => {
+            const payload: ProviderProfileInput = {
+              provider: 'openai',
+              name: CODEX_OAUTH_PROVIDER_NAME,
+              baseUrl: DEFAULT_CODEX_BASE_URL,
+              model: CODEX_OAUTH_PROVIDER_MODEL,
+              apiKey: '',
+            }
+
+            const existing = findCodexOAuthProfile(
+              getProviderProfiles(),
+              storedCodexOAuthProfileId,
+            )
+            const saved = existing
+              ? updateProviderProfile(existing.id, payload)
+              : addProviderProfile(payload, { makeActive: true })
+
+            if (!saved) {
+              setErrorMessage(
+                'Codex OAuth login finished, but the provider profile could not be saved.',
+              )
+              returnToMenu()
+              return
+            }
+
+            const active =
+              existing && activeProfileId !== saved.id
+                ? setActiveProviderProfile(saved.id)
+                : saved
+            if (!active) {
+              setErrorMessage(
+                'Codex OAuth login finished, but the provider could not be set as the startup provider.',
+              )
+              returnToMenu()
+              return
+            }
+
+            persistCredentials({ profileId: saved.id })
+            const settingsOverrideError =
+              clearStartupProviderOverrideFromUserSettings()
+            const activationWarning = await activateCodexOAuthSession(tokens)
+            setHasStoredCodexOAuthCredentials(true)
+            setStoredCodexOAuthProfileId(saved.id)
+            refreshProfiles()
+            const warnings = [
+              activationWarning,
+              settingsOverrideError
+                ? `could not clear startup provider override (${settingsOverrideError})`
+                : null,
+            ].filter((warning): warning is string => Boolean(warning))
+            const message = buildCodexOAuthActivationMessage({
+              prefix: 'Codex OAuth configured',
+              activationWarning,
+              warnings,
+            })
+
+            if (mode === 'first-run') {
+              onDone({
+                action: 'saved',
+                activeProfileId: active.id,
+                message,
+              })
+              return
+            }
+
+            setStatusMessage(message)
+            setErrorMessage(undefined)
+            returnToMenu()
+          }}
+        />
+      )
+      break
+    case 'form':
+      content = renderForm()
+      break
     case 'select-active':
       content = renderProfileSelection(
         'Set active provider',
         'No providers available. Add one first.',
         profileId => {
-          if (profileId === GITHUB_PROVIDER_ID) {
-            const githubError = activateGithubProvider()
-            if (githubError) {
-              setErrorMessage(`Could not activate GitHub provider: ${githubError}`)
-              setScreen('menu')
-              return
-            }
-            refreshProfiles()
-            setStatusMessage(`Active provider: ${GITHUB_PROVIDER_LABEL}`)
-            setScreen('menu')
-            return
-          }
-
-          const active = setActiveProviderProfile(profileId)
-          if (!active) {
-            setErrorMessage('Could not change active provider.')
-            setScreen('menu')
-            return
-          }
-          const settingsOverrideError =
-            clearStartupProviderOverrideFromUserSettings()
-          refreshProfiles()
-          setStatusMessage(
-            settingsOverrideError
-              ? `Active provider: ${active.name}. Warning: could not clear startup provider override (${settingsOverrideError}).`
-              : `Active provider: ${active.name}`,
-          )
-          setScreen('menu')
+          void activateSelectedProvider(profileId)
         },
-          { includeGithub: true },
+        { includeGithub: true },
       )
       break
     case 'select-edit':
@@ -1139,14 +1503,31 @@ export function ProviderManager({
               refreshProfiles()
               setStatusMessage('GitHub provider deleted')
             }
-            setScreen('menu')
+            returnToMenu()
             return
           }
 
+          const deletedCodexOAuthProfile =
+            findCodexOAuthProfile(
+              profiles,
+              storedCodexOAuthProfileId,
+            )?.id === profileId
           const result = deleteProviderProfile(profileId)
           if (!result.removed) {
             setErrorMessage('Could not delete provider.')
           } else {
+            if (deletedCodexOAuthProfile) {
+              const cleared = clearCodexCredentials()
+              if (!cleared.success) {
+                setErrorMessage(
+                  cleared.warning ??
+                    'Provider deleted, but Codex OAuth credentials could not be cleared.',
+                )
+              } else {
+                setStoredCodexOAuthProfileId(undefined)
+              }
+              clearPersistedCodexOAuthProfile()
+            }
             const settingsOverrideError = result.activeProfileId
               ? clearStartupProviderOverrideFromUserSettings()
               : null
@@ -1157,7 +1538,7 @@ export function ProviderManager({
                 : 'Provider deleted',
             )
           }
-          setScreen('menu')
+          returnToMenu()
         },
         { includeGithub: true },
       )
@@ -1170,18 +1551,3 @@ export function ProviderManager({
 
   return <Pane color="permission">{content}</Pane>
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

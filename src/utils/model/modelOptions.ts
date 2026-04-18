@@ -33,8 +33,14 @@ import {
 } from './model.js'
 import { has1mContext } from '../context.js'
 import { getGlobalConfig } from '../config.js'
-import { getActiveOpenAIModelOptionsCache } from '../providerProfiles.js'
+import {
+  getActiveOpenAIModelOptionsCache,
+  getActiveProviderProfile,
+  getProfileModelOptions,
+} from '../providerProfiles.js'
 import { getCachedOllamaModelOptions, isOllamaProvider } from './ollamaModels.js'
+import { getCachedNvidiaNimModelOptions, isNvidiaNimProvider } from './nvidiaNimModels.js'
+import { getCachedMiniMaxModelOptions, isMiniMaxProvider } from './minimaxModels.js'
 import { getAntModels } from './antModels.js'
 import { getAllCopilotModels } from './copilotModels.js'
 import {
@@ -416,6 +422,26 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
     return [defaultOption]
   }
 
+  // When using NVIDIA NIM, show models from the NVIDIA catalog
+  if (isNvidiaNimProvider()) {
+    const defaultOption = getDefaultOptionForUser(fastMode)
+    const nvidiaModels = getCachedNvidiaNimModelOptions()
+    if (nvidiaModels.length > 0) {
+      return [defaultOption, ...nvidiaModels]
+    }
+    return [defaultOption]
+  }
+
+  // When using MiniMax, show models from the MiniMax catalog
+  if (isMiniMaxProvider()) {
+    const defaultOption = getDefaultOptionForUser(fastMode)
+    const minimaxModels = getCachedMiniMaxModelOptions()
+    if (minimaxModels.length > 0) {
+      return [defaultOption, ...minimaxModels]
+    }
+    return [defaultOption]
+  }
+
   if (process.env.USER_TYPE === 'ant') {
     // Build options from antModels config
     const antModelOptions: ModelOption[] = getAntModels().map(m => ({
@@ -480,6 +506,20 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
     ]
   }
 
+  // When a provider profile's env is applied, collect its models so they
+  // can be appended to the standard picker options below.
+  // We check PROFILE_ENV_APPLIED to avoid the ?? profiles[0] fallback in
+  // getActiveProviderProfile which would affect users with inactive profiles.
+  const profileEnvApplied = process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED === '1'
+  const profileModelOptions: ModelOption[] = []
+  if (profileEnvApplied) {
+    const activeProfile = getActiveProviderProfile()
+    if (activeProfile) {
+      const models = getProfileModelOptions(activeProfile)
+      profileModelOptions.push(...models)
+    }
+  }
+
   // PAYG 1P API: Default (Sonnet) + Sonnet 1M + Opus 4.6 + Opus 1M + Haiku
   if (getAPIProvider() === 'firstParty') {
     const payg1POptions = [getDefaultOptionForUser(fastMode)]
@@ -495,6 +535,7 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
       }
     }
     payg1POptions.push(getHaiku45Option())
+    payg1POptions.push(...profileModelOptions)
     return payg1POptions
   }
 
@@ -534,6 +575,7 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
   } else {
     payg3pOptions.push(getHaikuOption())
   }
+  payg3pOptions.push(...profileModelOptions)
   return payg3pOptions
 }
 

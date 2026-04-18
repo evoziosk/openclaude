@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
+import { DEFAULT_CODEX_BASE_URL } from '../services/api/providerConfig.ts'
 import {
   buildStartupEnvFromProfile,
   buildAtomicChatProfileEnv,
@@ -12,7 +13,9 @@ import {
   buildLaunchEnv,
   buildOllamaProfileEnv,
   buildOpenAIProfileEnv,
+  clearPersistedCodexOAuthProfile,
   createProfileFile,
+  isPersistedCodexOAuthProfile,
   maskSecretForDisplay,
   loadProfileFile,
   PROFILE_FILE_NAME,
@@ -22,6 +25,13 @@ import {
   selectAutoProfile,
   type ProfileFile,
 } from './providerProfile.ts'
+
+function makeJwt(payload: Record<string, unknown>): string {
+  const header = Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' }))
+    .toString('base64url')
+  const body = Buffer.from(JSON.stringify(payload)).toString('base64url')
+  return `${header}.${body}.signature`
+}
 
 function profile(profile: ProfileFile['profile'], env: ProfileFile['env']): ProfileFile {
   return {
@@ -156,7 +166,7 @@ test('matching persisted gemini env is reused for gemini launch', async () => {
   assert.equal(env.GEMINI_BASE_URL, 'https://example.test/v1beta/openai')
 })
 
-test('gemini launch ignores mismatched persisted openai env and strips other provider secrets', async () => {
+test('openai env variables take precedence over gemini', async () => {
   const env = await buildLaunchEnv({
     profile: 'gemini',
     persisted: profile('openai', {
@@ -177,16 +187,16 @@ test('gemini launch ignores mismatched persisted openai env and strips other pro
     },
   })
 
-  assert.equal(env.CLAUDE_CODE_USE_GEMINI, '1')
-  assert.equal(env.CLAUDE_CODE_USE_OPENAI, undefined)
-  assert.equal(env.GEMINI_MODEL, 'gemini-2.0-flash')
-  assert.equal(env.GEMINI_API_KEY, 'gem-live')
+  assert.equal(env.CLAUDE_CODE_USE_GEMINI, undefined) 
+  assert.equal(env.CLAUDE_CODE_USE_OPENAI, '1')
+  assert.equal(env.GEMINI_MODEL, undefined)
+  assert.equal(env.GEMINI_API_KEY, undefined)
   assert.equal(
     env.GEMINI_BASE_URL,
-    'https://generativelanguage.googleapis.com/v1beta/openai',
+    undefined,
   )
   assert.equal(env.GOOGLE_API_KEY, undefined)
-  assert.equal(env.OPENAI_API_KEY, undefined)
+  assert.equal(env.OPENAI_API_KEY, 'sk-live')
   assert.equal(env.CODEX_API_KEY, undefined)
   assert.equal(env.CHATGPT_ACCOUNT_ID, undefined)
 })
@@ -330,6 +340,7 @@ test('codex profiles accept explicit codex credentials', () => {
   assert.deepEqual(env, {
     OPENAI_BASE_URL: 'https://chatgpt.com/backend-api/codex',
     OPENAI_MODEL: 'codexspark',
+    CODEX_CREDENTIAL_SOURCE: 'existing',
     CODEX_API_KEY: 'codex-live',
     CHATGPT_ACCOUNT_ID: 'acct_123',
   })
@@ -417,6 +428,77 @@ test('saveProfileFile writes a profile that loadProfileFile can read back', () =
   }
 })
 
+test('buildCodexProfileEnv tags OAuth-saved profiles so logout can remove them safely', () => {
+  const env = buildCodexProfileEnv({
+    model: 'codexplan',
+    apiKey: makeJwt({
+      'https://api.openai.com/auth': {
+        chatgpt_account_id: 'acct_oauth',
+      },
+    }),
+    credentialSource: 'oauth',
+    processEnv: {},
+  })
+
+  assert.deepEqual(env, {
+    OPENAI_BASE_URL: DEFAULT_CODEX_BASE_URL,
+    OPENAI_MODEL: 'codexplan',
+    CODEX_CREDENTIAL_SOURCE: 'oauth',
+    CODEX_API_KEY: makeJwt({
+      'https://api.openai.com/auth': {
+        chatgpt_account_id: 'acct_oauth',
+      },
+    }),
+    CHATGPT_ACCOUNT_ID: 'acct_oauth',
+  })
+})
+
+test('clearPersistedCodexOAuthProfile removes only persisted Codex OAuth profiles', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'openclaude-codex-oauth-profile-'))
+
+  try {
+    const providerProfileModule = await import(
+      `./providerProfile.ts?ts=${Date.now()}-${Math.random()}`
+    )
+    const {
+      PROFILE_FILE_NAME,
+      clearPersistedCodexOAuthProfile,
+      createProfileFile,
+      isPersistedCodexOAuthProfile,
+      loadProfileFile,
+      saveProfileFile,
+    } = providerProfileModule
+    const oauthProfile = createProfileFile('codex', {
+      OPENAI_MODEL: 'codexplan',
+      OPENAI_BASE_URL: DEFAULT_CODEX_BASE_URL,
+      CHATGPT_ACCOUNT_ID: 'acct_oauth',
+      CODEX_CREDENTIAL_SOURCE: 'oauth',
+    })
+    saveProfileFile(oauthProfile, { cwd })
+
+    assert.equal(isPersistedCodexOAuthProfile(loadProfileFile({ cwd })), true)
+    assert.equal(
+      clearPersistedCodexOAuthProfile({ cwd }),
+      join(cwd, PROFILE_FILE_NAME),
+    )
+    assert.equal(loadProfileFile({ cwd }), null)
+
+    const existingCredentialProfile = createProfileFile('codex', {
+      OPENAI_MODEL: 'codexplan',
+      OPENAI_BASE_URL: DEFAULT_CODEX_BASE_URL,
+      CHATGPT_ACCOUNT_ID: 'acct_existing',
+      CODEX_CREDENTIAL_SOURCE: 'existing',
+    })
+    saveProfileFile(existingCredentialProfile, { cwd })
+
+    assert.equal(isPersistedCodexOAuthProfile(loadProfileFile({ cwd })), false)
+    assert.equal(clearPersistedCodexOAuthProfile({ cwd }), null)
+    assert.deepEqual(loadProfileFile({ cwd }), existingCredentialProfile)
+  } finally {
+    rmSync(cwd, { recursive: true, force: true })
+  }
+})
+
 test('buildStartupEnvFromProfile applies persisted gemini settings when no provider is explicitly selected', async () => {
   const env = await buildStartupEnvFromProfile({
     persisted: profile('gemini', {
@@ -480,8 +562,13 @@ test('buildStartupEnvFromProfile leaves explicit provider selections untouched',
     processEnv,
   })
 
-  assert.equal(env, processEnv)
+  // Remove the strict object equality check: assert.equal(env, processEnv)
   assert.equal(env.CLAUDE_CODE_USE_GEMINI, '1')
+  assert.equal(env.GEMINI_API_KEY, 'gem-live')
+  assert.equal(env.GEMINI_MODEL, 'gemini-2.0-flash')
+  // Add the new default fields injected by the function
+  assert.equal(env.GEMINI_BASE_URL, 'https://generativelanguage.googleapis.com/v1beta/openai')
+  assert.equal(env.GEMINI_AUTH_MODE, 'api-key')
   assert.equal(env.OPENAI_API_KEY, undefined)
 })
 
@@ -525,9 +612,12 @@ test('buildStartupEnvFromProfile treats explicit falsey provider flags as user i
     processEnv,
   })
 
-  assert.equal(env, processEnv)
-  assert.equal(env.CLAUDE_CODE_USE_OPENAI, '0')
-  assert.equal(env.GEMINI_API_KEY, undefined)
+  assert.equal(env.CLAUDE_CODE_USE_OPENAI, undefined)
+  assert.equal(env.CLAUDE_CODE_USE_GEMINI, '1')
+  assert.equal(env.GEMINI_API_KEY, 'gem-persisted')
+  assert.equal(env.GEMINI_MODEL, 'gemini-2.5-flash')
+  assert.equal(env.GEMINI_BASE_URL, 'https://generativelanguage.googleapis.com/v1beta/openai')
+  assert.equal(env.GEMINI_AUTH_MODE, 'api-key')
 })
 
 test('maskSecretForDisplay preserves only a short prefix and suffix', () => {

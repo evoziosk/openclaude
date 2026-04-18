@@ -1,7 +1,13 @@
 import {
+  readCodexCredentialsAsync,
+  refreshCodexAccessTokenIfNeeded,
+} from '../../utils/codexCredentials.js'
+import { logForDebugging } from '../../utils/debug.js'
+import { isBareMode } from '../../utils/envUtils.js'
+import {
   DEFAULT_CODEX_BASE_URL,
   isCodexBaseUrl,
-  resolveCodexApiCredentials,
+  resolveRuntimeCodexCredentials,
   resolveProviderRequest,
 } from './providerConfig.js'
 
@@ -400,6 +406,18 @@ export async function fetchCodexUsage(
   options: FetchCodexUsageOptions = {},
 ): Promise<CodexUsageData> {
   const processEnv = options.processEnv ?? process.env
+  const refreshResult = await refreshCodexAccessTokenIfNeeded().catch(
+    async error => {
+      logForDebugging(
+        `[codex] access token refresh failed before usage fetch: ${error instanceof Error ? error.message : String(error)}`,
+        { level: 'warn' },
+      )
+      return {
+        refreshed: false,
+        credentials: await readCodexCredentialsAsync(),
+      }
+    },
+  )
   const request = resolveProviderRequest({
     model: options.model ?? processEnv.OPENAI_MODEL,
     baseUrl: options.baseUrl ?? processEnv.OPENAI_BASE_URL,
@@ -410,16 +428,20 @@ export async function fetchCodexUsage(
     )
   }
 
-  const credentials = resolveCodexApiCredentials(processEnv)
+  const credentials = resolveRuntimeCodexCredentials({
+    env: processEnv,
+    storedCredentials: refreshResult.credentials,
+  })
   if (!credentials.apiKey) {
+    const oauthHint = isBareMode() ? '' : ', choose Codex OAuth in /provider'
     const authHint = credentials.authPath
-      ? ` or place a Codex auth.json at ${credentials.authPath}`
-      : ''
+      ? `${oauthHint} or place a Codex auth.json at ${credentials.authPath}`
+      : oauthHint
     throw new Error(`Codex auth is required. Set CODEX_API_KEY${authHint}.`)
   }
   if (!credentials.accountId) {
     throw new Error(
-      'Codex auth is missing chatgpt_account_id. Re-login with the Codex CLI or set CHATGPT_ACCOUNT_ID/CODEX_ACCOUNT_ID.',
+      'Codex auth is missing chatgpt_account_id. Re-login with Codex OAuth, the Codex CLI, or set CHATGPT_ACCOUNT_ID/CODEX_ACCOUNT_ID.',
     )
   }
 
@@ -441,4 +463,3 @@ export async function fetchCodexUsage(
 
   return normalizeCodexUsagePayload(await response.json())
 }
-

@@ -9,6 +9,7 @@ import { z } from 'zod/v4'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../../services/analytics/growthbook.js'
 import { queryModelWithStreaming } from '../../services/api/claude.js'
 import { collectCodexCompletedResponse } from '../../services/api/codexShim.js'
+import { fetchWithProxyRetry } from '../../services/api/fetchWithProxyRetry.js'
 import {
   resolveCodexApiCredentials,
   resolveProviderRequest,
@@ -125,7 +126,7 @@ function makeToolSchema(input: Input): BetaWebSearchTool20250305 {
     name: 'web_search',
     allowed_domains: input.allowed_domains,
     blocked_domains: input.blocked_domains,
-    max_uses: 8, // Hardcoded to 8 searches maximum
+    max_uses: 15, // Allow up to 15 searches per query for better coverage
   }
 }
 
@@ -314,7 +315,7 @@ async function runCodexWebSearch(
     body.reasoning = request.reasoning
   }
 
-  const response = await fetch(`${request.baseUrl}/responses`, {
+  const response = await fetchWithProxyRetry(`${request.baseUrl}/responses`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

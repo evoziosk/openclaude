@@ -1,4 +1,5 @@
 import { APIError } from '@anthropic-ai/sdk'
+import { fetchWithProxyRetry } from './fetchWithProxyRetry.js'
 import type {
   ResolvedCodexCredentials,
   ResolvedProviderRequest,
@@ -79,6 +80,185 @@ type ResponsesTool = {
 type CodexSseEvent = {
   event: string
   data: Record<string, any>
+}
+
+function isValidJson(value: string): boolean {
+  if (!value) {
+    return false
+  }
+
+  try {
+    JSON.parse(value)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function selectFinalFunctionCallArguments(
+  currentArguments: string,
+  doneArguments: string | undefined,
+): string {
+  if (!doneArguments) {
+    return currentArguments
+  }
+
+  if (!currentArguments) {
+    return doneArguments
+  }
+
+  if (doneArguments === currentArguments) {
+    return currentArguments
+  }
+
+  if (doneArguments.startsWith(currentArguments)) {
+    return doneArguments
+  }
+
+  if (currentArguments.startsWith(doneArguments)) {
+    return currentArguments
+  }
+
+  const currentIsValidJson = isValidJson(currentArguments)
+  const doneIsValidJson = isValidJson(doneArguments)
+  if (doneIsValidJson && !currentIsValidJson) {
+    return doneArguments
+  }
+  if (currentIsValidJson) {
+    return currentArguments
+  }
+
+  return currentArguments
+}
+
+function repairPossiblyTruncatedObjectJson(raw: string): string | null {
+  const suffixes = [
+    '}',
+    '"}',
+    ']}',
+    '"]}',
+    '}}',
+    '"}}',
+    ']}}',
+    '"]}}',
+    '"]}]}',
+    '}]}',
+  ]
+
+  try {
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? raw
+      : null
+  } catch {
+    for (const suffix of suffixes) {
+      try {
+        const repaired = raw + suffix
+        const parsed = JSON.parse(repaired)
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          return repaired
+        }
+      } catch {
+        // continue
+      }
+    }
+    return null
+  }
+}
+
+function isLikelyStructuredObjectLiteral(value: string): boolean {
+  return /^\s*\{\s*['"]?\w+['"]?\s*:/.test(value)
+}
+
+function shouldEmitFinalRawStructuredArguments(
+  toolName: string,
+  jsonBuffer: string,
+): boolean {
+  if (hasToolFieldMapping(toolName)) {
+    return false
+  }
+
+  const trimmed = jsonBuffer.trim()
+  if (!trimmed) {
+    return false
+  }
+
+  if (isLikelyStructuredObjectLiteral(trimmed)) {
+    return true
+  }
+
+  return trimmed.startsWith('{') || trimmed.startsWith('[')
+}
+
+function resolveToolBlockByIdentifiers(
+  toolBlocksByItemId: Map<
+    string,
+    {
+      index: number
+      toolUseId: string
+      toolName: string
+      jsonBuffer: string
+      normalizeAtStop: boolean
+      outputIndex?: number
+    }
+  >,
+  toolBlockItemIdByCallId: Map<string, string>,
+  toolBlockItemIdByOutputIndex: Map<number, string>,
+  itemId: unknown,
+  callId: unknown,
+  outputIndex: unknown,
+):
+  | {
+      itemId: string
+      toolBlock: {
+        index: number
+        toolUseId: string
+        toolName: string
+        jsonBuffer: string
+        normalizeAtStop: boolean
+        outputIndex?: number
+      }
+    }
+  | undefined {
+  if (typeof itemId === 'string' && itemId) {
+    const toolBlock = toolBlocksByItemId.get(itemId)
+    if (toolBlock) {
+      return { itemId, toolBlock }
+    }
+  }
+
+  if (typeof callId === 'string' && callId) {
+    const mappedItemId = toolBlockItemIdByCallId.get(callId)
+    if (mappedItemId) {
+      const toolBlock = toolBlocksByItemId.get(mappedItemId)
+      if (toolBlock) {
+        return { itemId: mappedItemId, toolBlock }
+      }
+    }
+  }
+
+  if (typeof outputIndex === 'number' && Number.isFinite(outputIndex)) {
+    const mappedItemId = toolBlockItemIdByOutputIndex.get(outputIndex)
+    if (mappedItemId) {
+      const toolBlock = toolBlocksByItemId.get(mappedItemId)
+      if (toolBlock) {
+        return { itemId: mappedItemId, toolBlock }
+      }
+    }
+  }
+
+  if (toolBlocksByItemId.size === 1) {
+    const single = toolBlocksByItemId.entries().next().value
+    if (single) {
+      const [singleItemId, singleToolBlock] = single
+      return {
+        itemId: singleItemId,
+        toolBlock: singleToolBlock,
+      }
+    }
+  }
+
+  return undefined
 }
 
 function makeUsage(usage?: {
@@ -563,12 +743,15 @@ export async function performCodexRequest(options: {
   }
   headers.originator ??= 'openclaude'
 
-  const response = await fetch(`${options.request.baseUrl}/responses`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(body),
-    signal: options.signal,
-  })
+  const response = await fetchWithProxyRetry(
+    `${options.request.baseUrl}/responses`,
+    {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      signal: options.signal,
+    },
+  )
 
   if (!response.ok) {
     const errorBody = await response.text().catch(() => 'unknown error')
@@ -584,15 +767,56 @@ export async function performCodexRequest(options: {
   return response
 }
 
-async function* readSseEvents(response: Response): AsyncGenerator<CodexSseEvent> {
-  const reader = response.body?.getReader()
-  if (!reader) return
+async function* readSseEvents(response: Response, signal?: AbortSignal): AsyncGenerator<CodexSseEvent> {
+  const streamReader = response.body?.getReader()
+  if (!streamReader) return
+  const reader = streamReader
 
   const decoder = new TextDecoder()
   let buffer = ''
+  const STREAM_IDLE_TIMEOUT_MS = 120_000 // 2 minutes without data
+  let lastDataTime = Date.now()
+
+  /**
+   * Read from the stream with an idle timeout. Respects the caller's
+   * AbortSignal — clears the idle timer on abort so the AbortError
+   * surfaces cleanly instead of a spurious idle timeout.
+   */
+  async function readWithTimeout(): Promise<ReadableStreamReadResult<Uint8Array>> {
+    return new Promise((resolve, reject) => {
+      const timeoutId = setTimeout(() => {
+        const elapsed = Math.round((Date.now() - lastDataTime) / 1000)
+        reject(new Error(
+          `Codex SSE stream idle for ${elapsed}s (limit: ${STREAM_IDLE_TIMEOUT_MS / 1000}s). Connection likely dropped.`,
+        ))
+      }, STREAM_IDLE_TIMEOUT_MS)
+
+      let abortCleanup: (() => void) | undefined
+      if (signal) {
+        abortCleanup = () => {
+          clearTimeout(timeoutId)
+        }
+        signal.addEventListener('abort', abortCleanup, { once: true })
+      }
+
+      reader.read().then(
+        result => {
+          clearTimeout(timeoutId)
+          if (signal && abortCleanup) signal.removeEventListener('abort', abortCleanup)
+          if (result.value) lastDataTime = Date.now()
+          resolve(result as ReadableStreamReadResult<Uint8Array>)
+        },
+        err => {
+          clearTimeout(timeoutId)
+          if (signal && abortCleanup) signal.removeEventListener('abort', abortCleanup)
+          reject(err)
+        },
+      )
+    })
+  }
 
   while (true) {
-    const { done, value } = await reader.read()
+    const { done, value } = await readWithTimeout()
     if (done) break
 
     buffer += decoder.decode(value, { stream: true })
@@ -653,10 +877,11 @@ function determineStopReason(
 
 export async function collectCodexCompletedResponse(
   response: Response,
+  signal?: AbortSignal,
 ): Promise<Record<string, any>> {
   let completedResponse: Record<string, any> | undefined
 
-  for await (const event of readSseEvents(response)) {
+  for await (const event of readSseEvents(response, signal)) {
     if (event.event === 'response.failed') {
       const msg = event.data?.response?.error?.message ??
         event.data?.error?.message ?? 'Codex response failed'
@@ -685,6 +910,7 @@ export async function collectCodexCompletedResponse(
 export async function* codexStreamToAnthropic(
   response: Response,
   model: string,
+  signal?: AbortSignal,
 ): AsyncGenerator<AnthropicStreamEvent> {
   const messageId = makeMessageId()
   const toolBlocksByItemId = new Map<
@@ -695,8 +921,11 @@ export async function* codexStreamToAnthropic(
       toolName: string
       jsonBuffer: string
       normalizeAtStop: boolean
+      outputIndex?: number
     }
   >()
+  const toolBlockItemIdByCallId = new Map<string, string>()
+  const toolBlockItemIdByOutputIndex = new Map<number, string>()
   let activeTextBlockIndex: number | null = null
   let activeTextBuffer = ''
   let textBufferMode: 'none' | 'pending' | 'strip' = 'none'
@@ -752,7 +981,7 @@ export async function* codexStreamToAnthropic(
     },
   }
 
-  for await (const event of readSseEvents(response)) {
+  for await (const event of readSseEvents(response, signal)) {
     const payload = event.data
 
     if (event.event === 'response.output_item.added') {
@@ -765,13 +994,26 @@ export async function* codexStreamToAnthropic(
         const initialArguments =
           typeof item.arguments === 'string' ? item.arguments : ''
         const normalizeAtStop = hasToolFieldMapping(toolName)
-        toolBlocksByItemId.set(String(item.id ?? toolUseId), {
+        const itemId = String(item.id ?? toolUseId)
+        toolBlocksByItemId.set(itemId, {
           index: blockIndex,
           toolUseId,
           toolName,
           jsonBuffer: initialArguments,
           normalizeAtStop,
+          outputIndex:
+            typeof payload.output_index === 'number' &&
+            Number.isFinite(payload.output_index)
+              ? payload.output_index
+              : undefined,
         })
+        toolBlockItemIdByCallId.set(String(toolUseId), itemId)
+        if (
+          typeof payload.output_index === 'number' &&
+          Number.isFinite(payload.output_index)
+        ) {
+          toolBlockItemIdByOutputIndex.set(payload.output_index, itemId)
+        }
         sawToolUse = true
 
         yield {
@@ -786,13 +1028,15 @@ export async function* codexStreamToAnthropic(
         }
 
         if (initialArguments && !normalizeAtStop) {
-          yield {
-            type: 'content_block_delta',
-            index: blockIndex,
-            delta: {
-              type: 'input_json_delta',
-              partial_json: initialArguments,
-            },
+          if (!shouldEmitFinalRawStructuredArguments(toolName, initialArguments)) {
+            yield {
+              type: 'content_block_delta',
+              index: blockIndex,
+              delta: {
+                type: 'input_json_delta',
+                partial_json: initialArguments,
+              },
+            }
           }
         }
       }
@@ -851,24 +1095,19 @@ export async function* codexStreamToAnthropic(
     }
 
     if (event.event === 'response.function_call_arguments.delta') {
-      const toolBlock = toolBlocksByItemId.get(String(payload.item_id ?? ''))
-      if (toolBlock) {
+      const toolBlockEntry = resolveToolBlockByIdentifiers(
+        toolBlocksByItemId,
+        toolBlockItemIdByCallId,
+        toolBlockItemIdByOutputIndex,
+        payload.item_id,
+        payload.call_id,
+        payload.output_index,
+      )
+      if (toolBlockEntry) {
+        const toolBlock = toolBlockEntry.toolBlock
         const deltaText = typeof payload.delta === 'string' ? payload.delta : ''
         if (deltaText) {
           toolBlock.jsonBuffer += deltaText
-        }
-
-        if (toolBlock.normalizeAtStop) {
-          continue
-        }
-
-        yield {
-          type: 'content_block_delta',
-          index: toolBlock.index,
-          delta: {
-            type: 'input_json_delta',
-            partial_json: deltaText,
-          },
         }
       }
       continue
@@ -877,8 +1116,31 @@ export async function* codexStreamToAnthropic(
     if (event.event === 'response.output_item.done') {
       const item = payload.item
       if (item?.type === 'function_call') {
-        const toolBlock = toolBlocksByItemId.get(String(item.id ?? ''))
-        if (toolBlock) {
+        const toolBlockEntry = resolveToolBlockByIdentifiers(
+          toolBlocksByItemId,
+          toolBlockItemIdByCallId,
+          toolBlockItemIdByOutputIndex,
+          item.id,
+          item.call_id,
+          payload.output_index,
+        )
+        if (toolBlockEntry) {
+          const { itemId, toolBlock } = toolBlockEntry
+          const doneArguments =
+            typeof item.arguments === 'string' ? item.arguments : undefined
+
+          toolBlock.jsonBuffer = selectFinalFunctionCallArguments(
+            toolBlock.jsonBuffer,
+            doneArguments,
+          )
+
+          if (!toolBlock.normalizeAtStop && doneArguments) {
+            const repairedDone = repairPossiblyTruncatedObjectJson(doneArguments)
+            if (repairedDone) {
+              toolBlock.jsonBuffer = repairedDone
+            }
+          }
+
           if (toolBlock.normalizeAtStop) {
             const normalizedInput = normalizeToolArguments(
               toolBlock.toolName,
@@ -892,12 +1154,41 @@ export async function* codexStreamToAnthropic(
                 partial_json: JSON.stringify(normalizedInput),
               },
             }
+          } else {
+            if (doneArguments) {
+              if (!toolBlock.jsonBuffer) {
+                toolBlock.jsonBuffer = doneArguments
+              } else if (doneArguments.startsWith(toolBlock.jsonBuffer)) {
+                toolBlock.jsonBuffer = doneArguments
+              }
+            }
+
+            const repairedStructuredJson = repairPossiblyTruncatedObjectJson(
+              toolBlock.jsonBuffer,
+            )
+            if (!repairedStructuredJson) {
+              continue
+            }
+            toolBlock.jsonBuffer = repairedStructuredJson
+
+            yield {
+              type: 'content_block_delta',
+              index: toolBlock.index,
+              delta: {
+                type: 'input_json_delta',
+                partial_json: toolBlock.jsonBuffer,
+              },
+            }
           }
           yield {
             type: 'content_block_stop',
             index: toolBlock.index,
           }
-          toolBlocksByItemId.delete(String(item.id))
+          toolBlocksByItemId.delete(itemId)
+          toolBlockItemIdByCallId.delete(toolBlock.toolUseId)
+          if (typeof toolBlock.outputIndex === 'number') {
+            toolBlockItemIdByOutputIndex.delete(toolBlock.outputIndex)
+          }
         }
       } else if (item?.type === 'message') {
         yield* closeActiveTextBlock()
@@ -921,6 +1212,43 @@ export async function* codexStreamToAnthropic(
   }
 
   yield* closeActiveTextBlock()
+
+  if (finalResponse) {
+    const outputItems = Array.isArray(finalResponse.output)
+      ? finalResponse.output
+      : []
+    for (const outputItem of outputItems) {
+      if (outputItem?.type !== 'function_call') {
+        continue
+      }
+      const toolBlockEntry = resolveToolBlockByIdentifiers(
+        toolBlocksByItemId,
+        toolBlockItemIdByCallId,
+        toolBlockItemIdByOutputIndex,
+        outputItem.id,
+        outputItem.call_id,
+        outputItem.output_index,
+      )
+      if (!toolBlockEntry) {
+        continue
+      }
+
+      const doneArguments =
+        typeof outputItem.arguments === 'string' ? outputItem.arguments : undefined
+      toolBlockEntry.toolBlock.jsonBuffer = selectFinalFunctionCallArguments(
+        toolBlockEntry.toolBlock.jsonBuffer,
+        doneArguments,
+      )
+
+      if (!toolBlockEntry.toolBlock.normalizeAtStop && doneArguments) {
+        const repairedDone = repairPossiblyTruncatedObjectJson(doneArguments)
+        if (repairedDone) {
+          toolBlockEntry.toolBlock.jsonBuffer = repairedDone
+        }
+      }
+    }
+  }
+
   for (const toolBlock of toolBlocksByItemId.values()) {
     if (toolBlock.normalizeAtStop) {
       const normalizedInput = normalizeToolArguments(
@@ -934,6 +1262,24 @@ export async function* codexStreamToAnthropic(
           type: 'input_json_delta',
           partial_json: JSON.stringify(normalizedInput),
         },
+      }
+    } else {
+      const repairedStructuredJson = repairPossiblyTruncatedObjectJson(
+        toolBlock.jsonBuffer,
+      )
+      if (repairedStructuredJson) {
+        toolBlock.jsonBuffer = repairedStructuredJson
+      }
+
+      if (toolBlock.jsonBuffer) {
+        yield {
+          type: 'content_block_delta',
+          index: toolBlock.index,
+          delta: {
+            type: 'input_json_delta',
+            partial_json: toolBlock.jsonBuffer,
+          },
+        }
       }
     }
     yield {

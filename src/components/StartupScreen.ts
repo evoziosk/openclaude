@@ -5,7 +5,7 @@
  * Addresses: https://github.com/Gitlawb/openclaude/issues/55
  */
 
-import { isLocalProviderUrl } from '../services/api/providerConfig.js'
+import { isLocalProviderUrl, resolveProviderRequest } from '../services/api/providerConfig.js'
 import { getLocalOpenAICompatibleProviderLabel } from '../utils/providerDiscovery.js'
 import { getSettings_DEPRECATED } from '../utils/settings/settings.js'
 import { parseUserSpecifiedModel } from '../utils/model/model.js'
@@ -110,39 +110,40 @@ function detectProvider(): { name: string; model: string; baseUrl: string; isLoc
 
   if (useOpenAI) {
     const rawModel = process.env.OPENAI_MODEL || 'gpt-4o'
-    const baseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1'
+    const resolvedRequest = resolveProviderRequest({
+      model: rawModel,
+      baseUrl: process.env.OPENAI_BASE_URL,
+    })
+    const baseUrl = resolvedRequest.baseUrl
     const isLocal = isLocalProviderUrl(baseUrl)
     let name = 'OpenAI'
-    if (/deepseek/i.test(baseUrl) || /deepseek/i.test(rawModel))       name = 'DeepSeek'
-    else if (/openrouter/i.test(baseUrl))                             name = 'OpenRouter'
-    else if (/together/i.test(baseUrl))                               name = 'Together AI'
-    else if (/groq/i.test(baseUrl))                                   name = 'Groq'
-    else if (/mistral/i.test(baseUrl) || /mistral/i.test(rawModel))     name = 'Mistral'
-    else if (/azure/i.test(baseUrl))                                  name = 'Azure OpenAI'
-    else if (/llama/i.test(rawModel))                                    name = 'Meta Llama'
-    else if (isLocal)                                                  name = getLocalOpenAICompatibleProviderLabel(baseUrl)
+    if (/nvidia/i.test(baseUrl) || /nvidia/i.test(rawModel) || process.env.NVIDIA_NIM)
+      name = 'NVIDIA NIM'
+    else if (/minimax/i.test(baseUrl) || /minimax/i.test(rawModel) || process.env.MINIMAX_API_KEY)
+      name = 'MiniMax'
+    else if (resolvedRequest.transport === 'codex_responses' || baseUrl.includes('chatgpt.com/backend-api/codex'))
+      name = 'Codex'
+    else if (/deepseek/i.test(baseUrl) || /deepseek/i.test(rawModel))
+      name = 'DeepSeek'
+    else if (/openrouter/i.test(baseUrl))
+      name = 'OpenRouter'
+    else if (/together/i.test(baseUrl))
+      name = 'Together AI'
+    else if (/groq/i.test(baseUrl))
+      name = 'Groq'
+    else if (/mistral/i.test(baseUrl) || /mistral/i.test(rawModel))
+      name = 'Mistral'
+    else if (/azure/i.test(baseUrl))
+      name = 'Azure OpenAI'
+    else if (/llama/i.test(rawModel))
+      name = 'Meta Llama'
+    else if (isLocal)
+      name = getLocalOpenAICompatibleProviderLabel(baseUrl)
     
     // Resolve model alias to actual model name + reasoning effort
-    let displayModel = rawModel
-    const codexAliases: Record<string, { model: string; reasoningEffort?: string }> = {
-      codexplan: { model: 'gpt-5.4', reasoningEffort: 'high' },
-      'gpt-5.4': { model: 'gpt-5.4', reasoningEffort: 'high' },
-      'gpt-5.3-codex': { model: 'gpt-5.3-codex', reasoningEffort: 'high' },
-      'gpt-5.3-codex-spark': { model: 'gpt-5.3-codex-spark' },
-      codexspark: { model: 'gpt-5.3-codex-spark' },
-      'gpt-5.2-codex': { model: 'gpt-5.2-codex', reasoningEffort: 'high' },
-      'gpt-5.1-codex-max': { model: 'gpt-5.1-codex-max', reasoningEffort: 'high' },
-      'gpt-5.1-codex-mini': { model: 'gpt-5.1-codex-mini' },
-      'gpt-5.4-mini': { model: 'gpt-5.4-mini', reasoningEffort: 'medium' },
-      'gpt-5.2': { model: 'gpt-5.2', reasoningEffort: 'medium' },
-    }
-    const alias = rawModel.toLowerCase()
-    if (alias in codexAliases) {
-      const resolved = codexAliases[alias]
-      displayModel = resolved.model
-      if (resolved.reasoningEffort) {
-        displayModel = `${displayModel} (${resolved.reasoningEffort})`
-      }
+    let displayModel = resolvedRequest.resolvedModel
+    if (resolvedRequest.reasoning?.effort) {
+      displayModel = `${displayModel} (${resolvedRequest.reasoning.effort})`
     }
     
     return { name, model: displayModel, baseUrl, isLocal }
@@ -152,7 +153,9 @@ function detectProvider(): { name: string; model: string; baseUrl: string; isLoc
   const settings = getSettings_DEPRECATED() || {}
   const modelSetting = settings.model || process.env.ANTHROPIC_MODEL || process.env.CLAUDE_MODEL || 'claude-sonnet-4-6'
   const resolvedModel = parseUserSpecifiedModel(modelSetting)
-  return { name: 'Anthropic', model: resolvedModel, baseUrl: 'https://api.anthropic.com', isLocal: false }
+  const baseUrl = process.env.ANTHROPIC_BASE_URL ?? 'https://api.anthropic.com'
+  const isLocal = isLocalProviderUrl(baseUrl)
+  return { name: 'Anthropic', model: resolvedModel, baseUrl, isLocal }
 }
 
 // ─── Box drawing ──────────────────────────────────────────────────────────────
